@@ -30,12 +30,12 @@ import json
 import time
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QIcon
+from PyQt6.QtGui import QPixmap, QIcon, QPainter, QColor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QDialog, QFormLayout, QMessageBox, QTabWidget, QSizeGrip,
-    QMenu, QRadioButton,
+    QMenu, QRadioButton, QStackedWidget, QSplitter,
 )
 
 import steam_api
@@ -46,28 +46,29 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 
 # ---------------------------------------------------------------------------
-# Steam client look: the real client's palette (dark navy + blue accent),
-# adapted for a translucent window.
+# Look: colorless translucent theme matching the Spotify wrapper.
+# Layout: mirrors the real Steam client (top-level STORE / LIBRARY /
+# COMMUNITY nav, left game list, right game-details page).
 # ---------------------------------------------------------------------------
-STEAM_BG = "rgba(27, 40, 56, 215)"        # #1b2838 library background
-STEAM_DARK = "#171a21"                     # top bar / tab strip
-STEAM_ACCENT = "#66c0f4"                   # links, highlights
-STEAM_TEXT = "#c7d5e0"                     # primary text
-STEAM_DIM = "#8f98a0"                      # secondary text
-STEAM_SELECTED = "#2a475e"                 # selected rows / active tab
-STEAM_GREEN = "#5c7e10"                    # PLAY button
-STEAM_GREEN_HOVER = "#7a9e14"
-STEAM_BLUE = "#1a9fff"                     # install / action button
-STEAM_BLUE_HOVER = "#47bfff"
+STEAM_BG = "rgba(20, 20, 25, 160)"        # window background
+STEAM_DARK = "rgba(0, 0, 0, 140)"         # titlebar / tab strip
+STEAM_ACCENT = "white"                    # headings, links
+STEAM_TEXT = "white"                      # primary text
+STEAM_DIM = "#9a9a9a"                     # secondary text
+STEAM_SELECTED = "rgba(255, 255, 255, 50)"  # selected rows / active nav
+STEAM_GREEN = "rgba(255, 255, 255, 60)"   # PLAY button
+STEAM_GREEN_HOVER = "rgba(255, 255, 255, 95)"
+STEAM_BLUE = "rgba(255, 255, 255, 30)"    # INSTALL button
+STEAM_BLUE_HOVER = "rgba(255, 255, 255, 60)"
 
 BTN_DARK = (
-    "QPushButton { background: " + STEAM_SELECTED + "; color: white; "
-    "padding: 6px; border-radius: 4px; }"
-    "QPushButton:hover { background: #3d6a8f; }"
+    "QPushButton { background: rgba(255,255,255,25); color: white; "
+    "padding: 6px; border-radius: 6px; }"
+    "QPushButton:hover { background: rgba(255,255,255,55); }"
 )
 SEARCH_STYLE = (
-    "QLineEdit { background: rgba(14, 20, 27, 200); color: " + STEAM_TEXT + "; "
-    "border: 1px solid " + STEAM_SELECTED + "; border-radius: 4px; padding: 6px; }"
+    "QLineEdit { background: rgba(255,255,255,25); color: white; "
+    "border: 1px solid rgba(255,255,255,50); border-radius: 6px; padding: 6px; }"
 )
 
 
@@ -269,36 +270,40 @@ ONLINE_STATE_LABELS = {
 
 
 class TitleBar(QWidget):
-    def __init__(self, parent_window, title="STEAM"):
+    # Darker than the body, matching PySpotify: near-opaque dark fill
+    # painted directly (rgba(12,12,14,~0.84)) over the translucent body.
+    _FILL = QColor(12, 12, 14, 215)
+
+    def __init__(self, parent_window, title="Steam"):
         super().__init__(parent_window)
         self._parent_window = parent_window
-        self.setFixedHeight(34)
+        self.setFixedHeight(28)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 8, 0)
+        layout.setContentsMargins(10, 0, 8, 0)
 
         label = QLabel(title)
-        label.setStyleSheet(
-            "color: " + STEAM_ACCENT + "; font-weight: bold; font-size: 13px; "
-            "background: transparent; letter-spacing: 2px;")
+        label.setStyleSheet("color: white; font-weight: bold; background: transparent;")
         layout.addWidget(label)
         layout.addStretch()
 
-        min_btn = QPushButton("–")
-        close_btn = QPushButton("✕")
+        min_btn = QPushButton("_")
+        close_btn = QPushButton("x")
         for b in (min_btn, close_btn):
-            b.setFixedSize(28, 24)
+            b.setFixedSize(24, 24)
             b.setStyleSheet(
-                "QPushButton { color: " + STEAM_DIM + "; background: transparent; "
-                "border: none; border-radius: 3px; font-size: 12px; }"
-                "QPushButton:hover { background: rgba(255,255,255,40); color: white; }"
+                "QPushButton { color: white; background: rgba(255,255,255,30); border: none; border-radius: 4px; }"
+                "QPushButton:hover { background: rgba(255,255,255,70); }"
             )
             layout.addWidget(b)
         min_btn.clicked.connect(parent_window.showMinimized)
         close_btn.clicked.connect(parent_window.close)
 
-        self.setStyleSheet("background: " + STEAM_DARK + ";")
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), self._FILL)
+        super().paintEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -340,10 +345,10 @@ class PropertiesDialog(QDialog):
             "QDialog { background: " + STEAM_DARK + "; color: " + STEAM_TEXT + "; } "
             "QLabel { color: " + STEAM_TEXT + "; } "
             "QTabWidget::pane { border: none; border-top: 2px solid " + STEAM_SELECTED + "; } "
-            "QTabBar::tab { background: #0e141b; color: " + STEAM_DIM + "; "
+            "QTabBar::tab { background: rgba(0,0,0,90); color: " + STEAM_DIM + "; "
             "padding: 7px 16px; margin-right: 2px; } "
             "QTabBar::tab:selected { background: " + STEAM_SELECTED + "; color: white; } "
-            "QLineEdit { background: #0e141b; color: " + STEAM_TEXT + "; "
+            "QLineEdit { background: rgba(0,0,0,120); color: " + STEAM_TEXT + "; "
             "border: 1px solid " + STEAM_SELECTED + "; border-radius: 4px; padding: 6px; } "
             "QRadioButton { color: " + STEAM_TEXT + "; spacing: 8px; padding: 4px; } "
         )
@@ -410,7 +415,7 @@ class PropertiesDialog(QDialog):
         self._capsule = QLabel("loading artwork…")
         self._capsule.setFixedHeight(150)
         self._capsule.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._capsule.setStyleSheet("background: #0e141b; border-radius: 4px;")
+        self._capsule.setStyleSheet("background: rgba(0,0,0,90); border-radius: 4px;")
         layout.addWidget(self._capsule)
 
         title = QLabel(self.game_name)
@@ -617,23 +622,37 @@ class MainWindow(QMainWindow):
         body_layout = QVBoxLayout(body)
         outer.addWidget(body)
 
+        # Top-level nav like the real client: STORE / LIBRARY / COMMUNITY.
+        nav_row = QHBoxLayout()
+        self._nav_buttons = {}
+        for label in ("STORE", "LIBRARY", "COMMUNITY"):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _c, l=label: self._show_page(l))
+            nav_row.addWidget(b)
+            self._nav_buttons[label] = b
+        nav_row.addStretch()
+        body_layout.addLayout(nav_row)
+
+        self.pages = QStackedWidget()
+        body_layout.addWidget(self.pages)
+
+        # --- LIBRARY page: left game list, right game-details ---------
+        library_page = QWidget()
+        library_page.setStyleSheet("background: transparent;")
+        lib_layout = QHBoxLayout(library_page)
+        lib_layout.setContentsMargins(0, 0, 0, 0)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        left = QWidget()
+        left.setStyleSheet("background: transparent;")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search your library...")
         self.search_box.textChanged.connect(self.filter_library)
         self.search_box.setStyleSheet(SEARCH_STYLE)
-        body_layout.addWidget(self.search_box)
-
-        self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(
-            "QTabWidget::pane { border: none; background: transparent; "
-            "border-top: 2px solid " + STEAM_SELECTED + "; } "
-            "QTabBar::tab { background: " + STEAM_DARK + "; color: " + STEAM_DIM + "; "
-            "padding: 8px 18px; margin-right: 2px; "
-            "border-top-left-radius: 4px; border-top-right-radius: 4px; } "
-            "QTabBar::tab:selected { background: " + STEAM_SELECTED + "; color: white; } "
-            "QTabBar::tab:hover:!selected { color: " + STEAM_TEXT + "; }"
-        )
-        body_layout.addWidget(self.tabs)
+        left_layout.addWidget(self.search_box)
 
         self.library_list = QListWidget()
         self.library_list.setIconSize(QSize(48, 48))
@@ -642,61 +661,52 @@ class MainWindow(QMainWindow):
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.library_list.customContextMenuRequested.connect(
             self.on_library_context_menu)
+        self.library_list.currentItemChanged.connect(
+            lambda _cur, _prev: self.update_details())
         self._style_list(self.library_list)
-        self.tabs.addTab(self.library_list, "LIBRARY")
+        left_layout.addWidget(self.library_list)
+        splitter.addWidget(left)
 
-        self.friends_list = QListWidget()
-        self.friends_list.setIconSize(QSize(40, 40))
-        self.friends_list.itemDoubleClicked.connect(self.on_friend_open_profile)
-        self._style_list(self.friends_list)
-        self.tabs.addTab(self.friends_list, "FRIENDS")
+        detail = QWidget()
+        detail.setStyleSheet("background: transparent;")
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(8, 0, 0, 0)
+        self.detail_hero = QLabel("Select a game")
+        self.detail_hero.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_hero.setMinimumHeight(160)
+        self.detail_hero.setStyleSheet(
+            "background: rgba(0,0,0,60); border-radius: 6px; color: #9a9a9a;")
+        detail_layout.addWidget(self.detail_hero)
+        self.detail_title = QLabel("")
+        self.detail_title.setStyleSheet(
+            "color: white; font-size: 17px; font-weight: bold;")
+        self.detail_title.setWordWrap(True)
+        detail_layout.addWidget(self.detail_title)
+        self.detail_meta = QLabel("")
+        self.detail_meta.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        self.detail_meta.setWordWrap(True)
+        detail_layout.addWidget(self.detail_meta)
 
-        # Store tab: in-app search (public search endpoint), results open
-        # in the real client's store UI.
-        store_tab = QWidget()
-        store_tab.setStyleSheet("background: transparent;")
-        store_layout = QVBoxLayout(store_tab)
-        store_layout.setContentsMargins(0, 0, 0, 0)
-        self.store_box = QLineEdit()
-        self.store_box.setPlaceholderText("Search the Steam store… (Enter to search)")
-        self.store_box.returnPressed.connect(self.search_store)
-        self.store_box.setStyleSheet(SEARCH_STYLE)
-        store_layout.addWidget(self.store_box)
-        self.store_list = QListWidget()
-        self.store_list.setIconSize(QSize(120, 45))
-        self.store_list.itemDoubleClicked.connect(self.on_store_open_page)
-        self._style_list(self.store_list)
-        store_layout.addWidget(self.store_list)
-        self.tabs.addTab(store_tab, "STORE")
-
-        launch_row = QHBoxLayout()
-        launch_btn = QPushButton("▶  PLAY")
-        launch_btn.clicked.connect(self.on_launch_clicked)
-        launch_btn.setStyleSheet(
-            "QPushButton { background: " + STEAM_GREEN + "; color: white; "
-            "font-weight: bold; padding: 9px; border-radius: 4px; }"
-            "QPushButton:hover { background: " + STEAM_GREEN_HOVER + "; }"
+        self.detail_play = QPushButton("▶  PLAY")
+        self.detail_play.clicked.connect(self.on_launch_clicked)
+        self.detail_play.setStyleSheet(
+            "QPushButton { background: rgba(255,255,255,60); color: white; "
+            "font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px; }"
+            "QPushButton:hover { background: rgba(255,255,255,95); }"
         )
-        launch_row.addWidget(launch_btn)
+        detail_layout.addWidget(self.detail_play)
 
-        install_btn = QPushButton("INSTALL")
-        install_btn.clicked.connect(self.on_install_clicked)
-        install_btn.setStyleSheet(
-            "QPushButton { background: " + STEAM_BLUE + "; color: white; "
-            "font-weight: bold; padding: 9px; border-radius: 4px; }"
-            "QPushButton:hover { background: " + STEAM_BLUE_HOVER + "; }"
-        )
-        launch_row.addWidget(install_btn)
+        get_row = QHBoxLayout()
+        self.detail_install = QPushButton("INSTALL")
+        self.detail_install.clicked.connect(self.on_install_clicked)
+        self.detail_install.setStyleSheet(BTN_DARK)
+        get_row.addWidget(self.detail_install)
+        self.detail_uninstall = QPushButton("UNINSTALL")
+        self.detail_uninstall.clicked.connect(self.on_uninstall_clicked)
+        self.detail_uninstall.setStyleSheet(BTN_DARK)
+        get_row.addWidget(self.detail_uninstall)
+        detail_layout.addLayout(get_row)
 
-        uninstall_btn = QPushButton("UNINSTALL")
-        uninstall_btn.clicked.connect(self.on_uninstall_clicked)
-        uninstall_btn.setStyleSheet(BTN_DARK)
-        launch_row.addWidget(uninstall_btn)
-        body_layout.addLayout(launch_row)
-
-        # Community/store links for the selected library game. These live
-        # in the real client's UI (no API exists), so they open Steam
-        # windows via steam://openurl/.
         links_row = QHBoxLayout()
         for label, handler in (
             ("Store Page", self.on_store_page_clicked),
@@ -708,15 +718,70 @@ class MainWindow(QMainWindow):
             b.clicked.connect(handler)
             b.setStyleSheet(BTN_DARK)
             links_row.addWidget(b)
-        chat_btn = QPushButton("Steam Chat")
-        chat_btn.clicked.connect(lambda: steam_api.open_friends())
-        chat_btn.setStyleSheet(BTN_DARK)
-        links_row.addWidget(chat_btn)
-        front_btn = QPushButton("Store Front")
+        detail_layout.addLayout(links_row)
+
+        self.detail_props = QPushButton("Properties…")
+        self.detail_props.clicked.connect(self.open_properties_for_selected)
+        self.detail_props.setStyleSheet(BTN_DARK)
+        detail_layout.addWidget(self.detail_props)
+
+        self.detail_blurb = QLabel("")
+        self.detail_blurb.setWordWrap(True)
+        self.detail_blurb.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        detail_layout.addWidget(self.detail_blurb)
+        detail_layout.addStretch()
+        splitter.addWidget(detail)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+        lib_layout.addWidget(splitter)
+        self.pages.addWidget(library_page)
+
+        # --- STORE page: in-app search, results open in Steam ---------
+        store_page = QWidget()
+        store_page.setStyleSheet("background: transparent;")
+        store_layout = QVBoxLayout(store_page)
+        store_layout.setContentsMargins(0, 0, 0, 0)
+        self.store_box = QLineEdit()
+        self.store_box.setPlaceholderText("Search the Steam store… (Enter to search)")
+        self.store_box.returnPressed.connect(self.search_store)
+        self.store_box.setStyleSheet(SEARCH_STYLE)
+        store_layout.addWidget(self.store_box)
+        self.store_list = QListWidget()
+        self.store_list.setIconSize(QSize(120, 45))
+        self.store_list.itemDoubleClicked.connect(self.on_store_open_page)
+        self._style_list(self.store_list)
+        store_layout.addWidget(self.store_list)
+        front_btn = QPushButton("Open Store Front in Steam")
         front_btn.clicked.connect(lambda: steam_api.open_store_front())
         front_btn.setStyleSheet(BTN_DARK)
-        links_row.addWidget(front_btn)
-        body_layout.addLayout(links_row)
+        store_layout.addWidget(front_btn)
+        self.pages.addWidget(store_page)
+
+        # --- COMMUNITY page: friends, chat, profiles ------------------
+        community_page = QWidget()
+        community_page.setStyleSheet("background: transparent;")
+        community_layout = QVBoxLayout(community_page)
+        community_layout.setContentsMargins(0, 0, 0, 0)
+        self.friends_list = QListWidget()
+        self.friends_list.setIconSize(QSize(40, 40))
+        self.friends_list.itemDoubleClicked.connect(self.on_friend_open_profile)
+        self._style_list(self.friends_list)
+        community_layout.addWidget(self.friends_list)
+        social_row = QHBoxLayout()
+        chat_btn = QPushButton("Open Steam Chat")
+        chat_btn.clicked.connect(lambda: steam_api.open_friends())
+        chat_btn.setStyleSheet(BTN_DARK)
+        social_row.addWidget(chat_btn)
+        profile_btn = QPushButton("My Profile")
+        profile_btn.clicked.connect(
+            lambda: steam_api.open_profile(self.steam_id))
+        profile_btn.setStyleSheet(BTN_DARK)
+        social_row.addWidget(profile_btn)
+        social_row.addStretch()
+        community_layout.addLayout(social_row)
+        self.pages.addWidget(community_page)
+
+        self._show_page("LIBRARY")
 
         # Status line: Steam client state + background-op progress.
         self.status_label = QLabel("Steam: hidden (tray only)")
@@ -727,16 +792,15 @@ class MainWindow(QMainWindow):
         outer.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
 
         self._all_games = []
+        self._details_cache = {}  # appid -> store details (hero, blurb)
         self.reload_library()
         self.reload_friends()
 
     def _style_list(self, widget: QListWidget):
         widget.setStyleSheet(
-            "QListWidget { background: rgba(0,0,0,70); color: " + STEAM_TEXT + "; "
-            "border: none; outline: none; }"
-            "QListWidget::item { padding: 8px; border: none; }"
-            "QListWidget::item:hover { background: rgba(102,192,244,25); }"
-            "QListWidget::item:selected { background: " + STEAM_SELECTED + "; color: white; }"
+            "QListWidget { background: rgba(0,0,0,60); color: white; border: none; }"
+            "QListWidget::item { padding: 6px; }"
+            "QListWidget::item:selected { background: rgba(255,255,255,50); }"
         )
 
     # --- Library -----------------------------------------------------
@@ -750,6 +814,8 @@ class MainWindow(QMainWindow):
     def on_library_loaded(self, games):
         self._all_games = games
         self.populate_library(games)
+        if self.library_list.count() and self.library_list.currentItem() is None:
+            self.library_list.setCurrentRow(0)
 
     def populate_library(self, games):
         self.library_list.clear()
@@ -791,6 +857,100 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text):
         self.status_label.setText(text)
+
+    def _show_page(self, label):
+        idx = {"STORE": 1, "LIBRARY": 0, "COMMUNITY": 2}[label]
+        self.pages.setCurrentIndex(idx)
+        for name, b in self._nav_buttons.items():
+            on = name == label
+            b.setChecked(on)
+            b.setStyleSheet(
+                "QPushButton { background: transparent; color: white; "
+                "font-weight: bold; padding: 8px 16px; border: none; "
+                "border-bottom: 2px solid rgba(255,255,255,200); }"
+                if on else
+                "QPushButton { background: transparent; color: #9a9a9a; "
+                "font-weight: bold; padding: 8px 16px; border: none; }"
+                "QPushButton:hover { color: white; }"
+            )
+
+    def update_details(self):
+        """Refresh the right-hand game page for the current selection,
+        like clicking a game in Steam's left list."""
+        appid, name = self._selected_game()
+        if appid is None:
+            self.detail_title.setText("")
+            self.detail_meta.setText("")
+            self.detail_blurb.setText("")
+            self.detail_hero.setText("Select a game")
+            self.detail_hero.setPixmap(QPixmap())
+            return
+        self.detail_title.setText(name)
+        playtime = 0
+        for g in self._all_games:
+            if g.get("appid") == appid:
+                playtime = g.get("playtime_forever", 0) or 0
+                break
+        hrs = playtime / 60
+        man = steam_api.read_manifest(appid)
+        if man:
+            size = int(man.get("SizeOnDisk", 0) or 0)
+            status = f"✓ Installed ({size / 1e9:.2f} GB)"
+        else:
+            status = "Not installed"
+        played = f"{hrs:.1f} hours on record" if hrs >= 0.1 else "Never played"
+        self.detail_meta.setText(f"{status}   •   {played}")
+        self.detail_install.setEnabled(not man)
+        self.detail_uninstall.setEnabled(bool(man))
+        cached = self._details_cache.get(appid)
+        if cached is not None:
+            self._apply_details(appid, cached)
+        else:
+            self.detail_hero.setText("loading…")
+            self.detail_blurb.setText("")
+            loader = DetailsLoader(appid)
+            loader.loaded.connect(
+                lambda d, a=appid: self._apply_details(a, d))
+            self._icon_loaders.append(loader)
+            loader.start()
+
+    def _apply_details(self, appid, d):
+        self._details_cache[appid] = d
+        cur, _name = self._selected_game()
+        if cur != appid:  # selection moved on while loading
+            return
+        if d.get("blurb"):
+            self.detail_blurb.setText(d["blurb"])
+        if d.get("header"):
+            loader = IconLoader(None, d["header"])
+            loader.loaded.connect(
+                lambda _i, data, a=appid: self._apply_hero(a, data))
+            self._icon_loaders.append(loader)
+            loader.start()
+        elif not d:
+            self.detail_hero.setText("No artwork")
+
+    def _apply_hero(self, appid, data):
+        cur, _name = self._selected_game()
+        if cur != appid:
+            return
+        pix = QPixmap()
+        if pix.loadFromData(data):
+            self.detail_hero.setPixmap(pix.scaledToWidth(
+                480, Qt.TransformationMode.SmoothTransformation))
+            self.detail_hero.setText("")
+
+    def open_properties_for_selected(self):
+        appid, name = self._selected_game()
+        if appid is None:
+            return
+        playtime = 0
+        for g in self._all_games:
+            if g.get("appid") == appid:
+                playtime = g.get("playtime_forever", 0) or 0
+                break
+        dlg = PropertiesDialog(self, appid, name, playtime)
+        dlg.exec()
 
     def _maybe_shutdown_steam(self, reason):
         """Close the hidden client after a background op completes -- but
@@ -851,13 +1011,7 @@ class MainWindow(QMainWindow):
         elif chosen == act_guides:
             steam_api.open_guides(appid)
         elif chosen == act_props:
-            playtime = 0
-            for g in self._all_games:
-                if g.get("appid") == appid:
-                    playtime = g.get("playtime_forever", 0) or 0
-                    break
-            dlg = PropertiesDialog(self, appid, name, playtime)
-            dlg.exec()
+            self.open_properties_for_selected()
 
     def on_install_clicked(self):
         appid, name = self._selected_game()
@@ -1031,6 +1185,9 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    # Match steam-transparent.desktop so the taskbar groups the window
+    # with our pinned launcher + monochrome icon (else generic "python").
+    app.setDesktopFileName("steam-transparent")
 
     cfg = load_config()
     if "api_key" not in cfg or "steam_id" not in cfg:

@@ -75,22 +75,24 @@ window), not as a full desktop app:
 - **Store tab**: search the Steam store without leaving the app (uses
   the store's own public search backend). Results show price/discount;
   double-click opens the game's page in the real client.
-- **Library links row**: Store Page, Community Hub, Workshop, and
-  Guides for the selected game, plus Steam Chat and the Store Front.
-- **Friends**: double-click a friend to open their community profile.
+- **Game page links**: Store Page, Community Hub, Workshop, and
+  Guides for the selected game, on the right-hand details page.
+- **Community page**: friends list (double-click opens a profile),
+  Steam Chat, and My Profile buttons.
 - These all open inside the real Steam client via `steam://openurl/`
   (Store/Community/Workshop have no API -- this is the official way to
   point the client at them). Browsing summons Steam windows; only the
   background ops (install/download/uninstall) stay tray-hidden.
 
-## Look + right-click Properties
+## Look + layout
 
-The window uses Steam's own palette (`#1b2838` navy, `#66c0f4`
-accent, `#2a475e` selection, green PLAY button). Right-click any
-library game for:
-
-- Play / Install / Uninstall, Store Page, Community Hub, Workshop,
-  Guides -- same actions as the buttons, from the cursor.
+Colorless translucent theme, matching the Spotify wrapper -- but laid
+out like the real Steam client: top-level **STORE / LIBRARY /
+COMMUNITY** nav, a left game list, and a right game-details page
+(artwork hero, playtime + install status, PLAY / INSTALL / UNINSTALL,
+Store/Hub/Workshop/Guides links, Properties button). Right-click any
+library game for the same actions plus **Properties…** with
+Steam-style tabs:
 - **Properties…** with Steam-style tabs:
   - *General*: capsule artwork, developer, release date, playtime,
     install status/size.

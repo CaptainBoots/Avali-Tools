@@ -25,6 +25,7 @@ import sys
 import os
 import argparse
 import json
+import re
 
 DEBUG = os.environ.get("SPOTIFY_DEBUG", "0") == "1"
 
@@ -203,6 +204,10 @@ footer a img,
 [data-testid="now-playing-bar"][data-testid="now-playing-bar"] img {{
     margin: 0 !important;
 }}
+/* NOTE: slider fills are painted from paintSliders() in JS, not here:
+   the broad transparency rule above carries ~30 :not()s, so any
+   stylesheet rule loses the !important specificity war. Inline
+   !important via JS outranks everything. */
 /* Now Playing sidebar showcase: big centered artwork, larger track text.
    Multiple candidate selectors since Spotify renames this panel often. */
 aside[aria-label*="Now playing" i],
@@ -523,7 +528,7 @@ def build_inject_script(css: str) -> QWebEngineScript:
                 }}
             }} catch (e) {{}}
         }}
-        // Free-tier unlock attempt: shuffle/repeat/loop buttons get
+                // Free-tier unlock attempt: shuffle/repeat/loop buttons get
         // disabled/aria-disabled by Spotify without Premium. Strip the
         // flags so clicks go through. If Spotify enforces server-side the
         // state still won't stick -- the dump shows which case it is.
@@ -545,7 +550,7 @@ def build_inject_script(css: str) -> QWebEngineScript:
         }}
         // Spicetify ports: AI-artist + video-track auto-skip.
         // Canvas loops are muted/short, so the guards only catch real video.
-        function applyAll() {{ injectCSS(); hideUpsells(); maybeSkip(); unblockControls(); }}
+        function applyAll() {{ injectCSS(); hideUpsells(); maybeSkip(); unblockControls(); paintSliders(); }}
         applyAll();
         function skipTrack(reason) {{
             try {{
@@ -575,6 +580,147 @@ def build_inject_script(css: str) -> QWebEngineScript:
                 }}
             }} catch (e) {{}}
         }}
+        // Slider fills: the broad transparency rule above clears
+        // backgrounds on plain inner divs, wiping the white elapsed
+        // fills and tracks of the playback + volume bars. Repaint them
+        // via inline !important, which outranks even the ~30-:not()
+        // broad rule (no stylesheet rule can win that specificity war).
+        // Layout wrappers are FULL-WIDTH boxes -- painting them would
+        // turn the whole bar white -- so only the width-carrying
+        // descendants get paint: direct children with their own style
+        // or testid (tooltip follower, handle) plus everything nested
+        // deeper than the wrappers. Geometry untouched, colors only.
+        var _sldLog = 0;
+        function paintSliders() {{
+            try {{
+                var painted = false;
+                var pb = document.querySelector(
+                    '[data-testid="progress-bar-background"]');
+                if (pb) {{
+                    pb.style.setProperty('background-color',
+                        'rgba(255,255,255,0.28)', 'important');
+                    painted = paintFillTree(pb) || painted;
+                }}
+                var vb = document.querySelector('[data-testid="volume-bar"]');
+                if (vb) {{
+                    // Outer div is a 12px-tall invisible hit area, NOT the
+                    // visible track: keep it transparent or it renders as
+                    // a fat extra bar. The real 4px track is the nested
+                    // background; paintNestedBar handles it.
+                    var track = null;
+                    var kids = vb.children;
+                    for (var k = 0; k < kids.length; k++)
+                        if (!track && kids[k].tagName === 'DIV') track = kids[k];
+                    if (track) {{
+                        track.style.setProperty('background-color',
+                            'transparent', 'important');
+                        var nested = track.querySelector(
+                            '[data-testid="progress-bar"]');
+                        if (nested) {{ paintNestedBar(nested); painted = true; }}
+                    }}
+                }}
+                if (painted) {{
+                    // Spotify re-renders bar markup on track change,
+                    // wiping inline styles -- the 500ms tick restores them.
+                    if (DEBUGJS && Date.now() - _sldLog > 30000) {{
+                        _sldLog = Date.now();
+                        console.log('[sliders] fill painted');
+                    }}
+                }}
+            }} catch (e) {{}}
+        }}
+        function paintFillTree(track) {{
+            try {{
+                track.style.setProperty('background-color',
+                    'rgba(255,255,255,0.28)', 'important');
+                paintFillChildren(track);
+            }} catch (e) {{}}
+            return true;
+        }}
+        function paintFillChildren(container) {{
+            var any = false;
+            try {{
+                var kids = container.children;
+                for (var i = 0; i < kids.length; i++) {{
+                    var c = kids[i];
+                    if (c.tagName !== 'DIV') continue;
+                    var st = c.getAttribute('style') || '';
+                    var tid = c.getAttribute('data-testid') || '';
+                    if (tid || st.indexOf('left') !== -1) {{
+                        c.style.setProperty(
+                            'background-color', '#ffffff', 'important');
+                        any = true;
+                    }} else if (c.matches('[data-testid="progress-bar"]')) {{
+                        paintNestedBar(c); any = true;
+                    }} else {{
+                        var nested = c.querySelector(
+                            '[data-testid="progress-bar"]');
+                        if (nested) {{ paintNestedBar(nested); any = true; continue; }}
+                        var inner = c.querySelectorAll('div');
+                        for (var j = 0; j < inner.length; j++)
+                            inner[j].style.setProperty(
+                                'background-color', '#ffffff', 'important');
+                        if (inner.length) any = true;
+                    }}
+                }}
+            }} catch (e) {{}}
+            return any;
+        }}
+        // Volume is a progress-bar nested inside the volume hit area:
+        // nested shell stays transparent, the nested 4px background is
+        // the visible grey track, and its children get the same
+        // wrapper-aware treatment as the main bar.
+        function paintNestedBar(nested) {{
+            try {{
+                nested.style.setProperty(
+                    'background-color', 'transparent', 'important');
+                var nbg = nested.querySelector(
+                    '[data-testid="progress-bar-background"]');
+                if (!nbg) return;
+                nbg.style.setProperty('background-color',
+                    'rgba(255,255,255,0.28)', 'important');
+                paintFillChildren(nbg);
+            }} catch (e) {{}}
+        }}
+        // One-shot slider diagnostic: dumps the real progress/volume
+        // markup so fills can be targeted exactly (log via --debug).
+        function probeSliders() {{
+            try {{
+                var r = document.querySelector('[data-testid="progress-bar"]');
+                console.log('[sliderprobe] progress found=' + !!r);
+                if (r) {{
+                    console.log('[sliderprobe] html=' + r.outerHTML.slice(0, 2200));
+                    var divs = r.querySelectorAll('div');
+                    var rootW = r.getBoundingClientRect().width;
+                    for (var i = 0; i < divs.length && i < 10; i++) {{
+                        var cs = getComputedStyle(divs[i]);
+                        var dr = divs[i].getBoundingClientRect();
+                        console.log('[sliderprobe] div' + i + ' bg=' + cs.backgroundColor +
+                            ' w=' + Math.round(dr.width) + '/' + Math.round(rootW) +
+                            ' h=' + Math.round(dr.height) + ' ov=' + cs.overflow +
+                            ' op=' + cs.opacity +
+                            ' style=' + (divs[i].getAttribute('style') || '(none)').slice(0, 220));
+                    }}
+                }}
+                var v = document.querySelector('[data-testid*="volume"]');
+                console.log('[sliderprobe] volume found=' + !!v +
+                    (v ? ' html=' + v.outerHTML.slice(0, 3200) : ''));
+                if (v) {{
+                    var vv = v.querySelectorAll('div');
+                    var vw = v.getBoundingClientRect().width;
+                    for (var k = 0; k < vv.length && k < 8; k++) {{
+                        var vc = getComputedStyle(vv[k]);
+                        var vr = vv[k].getBoundingClientRect();
+                        console.log('[sliderprobe] voldiv' + k + ' bg=' + vc.backgroundColor +
+                            ' w=' + Math.round(vr.width) + '/' + Math.round(vw) +
+                            ' h=' + Math.round(vr.height) + ' ov=' + vc.overflow +
+                            ' op=' + vc.opacity +
+                            ' style=' + (vv[k].getAttribute('style') || '(none)').slice(0, 200));
+                    }}
+                }}
+            }} catch (e) {{ console.log('[sliderprobe] err ' + e); }}
+        }}
+        if (DEBUGJS) setTimeout(probeSliders, 10000);
         // SpicyTracker port: strip ?si= tracking from Spotify share links,
         // both copy-event and clipboard-API paths.
         var _copyHooked = false;
@@ -622,6 +768,9 @@ def build_inject_script(css: str) -> QWebEngineScript:
         // Spotify is a single-page app; re-apply in case it replaces
         // <head> content or the style gets stripped.
         setInterval(applyAll, 2000);
+        // Sliders move continuously; repaint fills on their own faster
+        // tick so progress motion looks smooth.
+        setInterval(paintSliders, 500);
         // documentElement may not exist yet at DocumentCreation --
         // retry until we can observe it.
         function armObserver() {{
@@ -869,6 +1018,27 @@ def build_adskip_script() -> QWebEngineScript:
             }} catch (e) {{}}
         }}, 150);
         log('adskip armed (MainWorld)');
+        // Clipboard bridge: QtWebEngine's async clipboard can silently
+        // swallow programmatic copies (Share -> Copy link). Stash every
+        // copy where Python can see it; the Python side mirrors it onto
+        // the real system clipboard (this also keeps ?si= stripping even
+        // when Chromium's own clipboard path is the broken half).
+        try {{
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+                var _cwt = navigator.clipboard.writeText.bind(navigator.clipboard);
+                navigator.clipboard.writeText = function(txt) {{
+                    try {{ window.__pyClipboardPending = String(txt); }} catch (e) {{}}
+                    try {{ return _cwt(txt); }}
+                    catch (e) {{ return Promise.resolve(); }}
+                }};
+            }}
+            document.addEventListener('copy', function() {{
+                try {{
+                    var t = (window.getSelection() || '').toString();
+                    if (t) window.__pyClipboardPending = t;
+                }} catch (e) {{}}
+            }});
+        }} catch (e) {{}}
     }})();
     """
     script = QWebEngineScript()
@@ -1417,6 +1587,14 @@ class SpotifyWindow(QMainWindow):
 
         self.page.load(QUrl(SPOTIFY_URL))
 
+        # Clipboard bridge pump: the MainWorld script stashes every
+        # programmatic copy in window.__pyClipboardPending; mirror it
+        # onto the real system clipboard (see _pump_clipboard).
+        self._last_clip = ""
+        self._clip_timer = QTimer(self)
+        self._clip_timer.timeout.connect(self._pump_clipboard)
+        self._clip_timer.start(500)
+
         # SPOTIFY_DUMP=1: one-shot footer/art diagnostic (~12s after load),
         # printed as [dump] lines for pasting into a bug report.
         if os.environ.get("SPOTIFY_DUMP") == "1":
@@ -1436,7 +1614,34 @@ class SpotifyWindow(QMainWindow):
             self._grip.raise_()
             self._grip.show()
 
+    def _pump_clipboard(self):
+        try:
+            self.page.runJavaScript(
+                "window.__pyClipboardPending || ''", self._on_clip_text)
+        except Exception:
+            pass
+
+    def _on_clip_text(self, text):
+        if not text or text == self._last_clip:
+            return
+        self._last_clip = text
+        # SpicyTracker parity: strip ?si=/&si= tracking from Spotify
+        # share links even when they travel via this bridge.
+        try:
+            cleaned = re.sub(r"\?si=[^&\s]*&", "?", text)
+            cleaned = re.sub(r"[?&]si=[^&\s]*", "", cleaned)
+        except Exception:
+            cleaned = text
+        try:
+            QApplication.clipboard().setText(cleaned)
+            self.page.runJavaScript("window.__pyClipboardPending = ''")
+            if DEBUG:
+                print(f"[clipboard] bridged {len(cleaned)} chars", flush=True)
+        except Exception:
+            pass
+
     def resizeEvent(self, event):
+        super().resizeEvent(event)
         super().resizeEvent(event)
         grip = getattr(self, "_grip", None)
         if grip is not None:
@@ -1553,6 +1758,10 @@ def main():
     # Re-exec QApplication with only Qt args (strip our own flags).
     app = QApplication([sys.argv[0]] + qt_args)
     app.setApplicationName(APP_NAME)
+    # Match spotify-transparent.desktop so the taskbar groups the window
+    # with our pinned launcher + monochrome icon (else it shows as
+    # generic "python"). Sets the Wayland app_id / X11 WM_CLASS.
+    app.setDesktopFileName("spotify-transparent")
 
     if DEBUG:
         from PyQt6.QtCore import QT_VERSION_STR, qVersion
