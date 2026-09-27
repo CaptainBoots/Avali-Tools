@@ -17,11 +17,53 @@ installs whichever is missing via `pacman` (will prompt for your sudo
 password), then launches the app. You only need `./run.sh` — it calls
 `main.py` for you.
 
+## Controls
+
+The bottom player bar is Spotify's own web footer with a solid stock
+fill — all its buttons, seek and volume work natively, no bridging.
+
+## Spicetify snippets (ported)
+
+These Marketplace snippets are built in (CSS + text matching, so they
+survive Spotify renames):
+
+* Hide Made For You (home shelf)
+* Remove Browse button
+* Remove Popular shelves (radio, albums, new releases, #SpotifyWrapped)
+* Hide Full Screen button
+* Hide Mini Player button
+
+## Spicetify extensions (ported)
+
+* **adblockify** — already built in (network-level blocker, on by default)
+* **Auto Skip Videos** — skips playing video tracks (muted Canvas loops
+  excluded). Off: `SPOTIFY_SKIP_VIDEOS=0 ./run.sh`
+* **AI Band Blocker** — skips your blocklisted artists, matched against
+  the playing artist name:
+  `SPOTIFY_BLOCKED_ARTISTS="artist one,artist two" ./run.sh`, and/or
+  `SPOTIFY_BLOCKED_ARTISTS_FILE=~/.config/spotify-blocked-artists.txt`
+  (one per line, `#` comments allowed)
+* **SpicyTracker** — strips `?si=` tracking from Spotify share links on
+  copy (copy-event + clipboard-API paths), automatic
+* Not portable: Spicy/Copy/More Lyrics (need Genius keys / desktop-only UI)
+
+The window is frameless, so resizing is via the ◢ grip in the
+bottom-right corner (compositor edge-resize where supported).
+
 If you'd rather install manually:
 ```bash
 sudo pacman -S python-pyqt6 python-pyqt6-webengine
 python3 main.py
 ```
+
+Audio needs Widevine (Spotify streams are DRM-encrypted — without it
+you get `EMEError: No supported keysystem` and tracks won't play):
+```bash
+yay -S chromium-widevine   # or: yay -S google-chrome
+```
+`run.sh` checks for it on launch. Verify at
+https://bitmovin.com/demos/drm. Override path with
+`SPOTIFY_WIDEVINE_PATH=/path/to/libwidevinecdm.so`.
 
 First run: log into Spotify inside the window like any normal browser
 login. Your session is saved to `~/.local/share/SpotifyTransparent/`,

@@ -23,5 +23,18 @@ else
     echo "All required packages already installed."
 fi
 
+# Widevine CDM (audio): Spotify streams are DRM-encrypted. QtWebEngine
+# auto-loads /usr/lib/chromium/libwidevinecdm.so when present.
+if [ -f /usr/lib/chromium/libwidevinecdm.so ] \
+    || [ -f /opt/google/chrome/libwidevinecdm.so ] \
+    || [ -f /opt/google/chrome/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so ] \
+    || ls ~/.config/google-chrome/WidevineCdm >/dev/null 2>&1 \
+    || ls ~/.config/chromium/WidevineCdm >/dev/null 2>&1; then
+    echo "Widevine CDM found."
+else
+    echo "Widevine CDM not found - audio will fail (EMEError: No supported keysystem)."
+    echo "  Install it: yay -S chromium-widevine   (or: yay -S google-chrome)"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec python3 "$SCRIPT_DIR/main.py" "$@"
