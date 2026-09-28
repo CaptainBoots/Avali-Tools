@@ -45,7 +45,26 @@ survive Spotify renames):
   (one per line, `#` comments allowed)
 * **SpicyTracker** — strips `?si=` tracking from Spotify share links on
   copy (copy-event + clipboard-API paths), automatic
-* Not portable: Spicy/Copy/More Lyrics (need Genius keys / desktop-only UI)
+* Not portable: Spicy/Copy (need desktop-only UI)
+* **Lyrics** — in-page sidebar via the LYRICS button in the player bar
+  (karaoke word-timing when Netease has it, synced lines otherwise).
+  Providers tried in order: lrclib exact + search → Netease (ported
+  from Spicetify lyrics-plus) → Musixmatch → Vagalume → Genius →
+  lyrics.ovh → ChartLyrics. Ctrl+Shift+F searches inside lyrics,
+  Enter/Shift+Enter jumps between matches. The ⚙ panel holds API keys
+  plus provider order/enable toggles, saved to
+  `~/.config/SpotifyTransparent/lyrics_keys.json` (env keys remain
+  fallback defaults)
+* **Lyrics auto-transcribe** — when no provider has a track, the panel
+  offers two local-AI paths: YouTube audio matched by title-overlap
+  scoring (covers/remixes penalized) with a "Wrong song? Try next
+  match" retry, or live recording of the playing song via the PipeWire
+  monitor (restarts the track, guaranteed the right song — keep volume
+  up). First click builds an isolated venv and installs `yt-dlp`,
+  `faster-whisper` and an `ffmpeg` binary into it (PEP 668-clean, no
+  sudo, one-time ~600MB incl. the Whisper model), then transcribes
+  with timestamps (synced lines) and caches per track. Model override:
+  `SPOTIFY_WHISPER_MODEL=small ./run.sh` (default `base`).
 
 The window is frameless, so resizing is via the ◢ grip in the
 bottom-right corner (compositor edge-resize where supported).

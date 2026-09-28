@@ -44,6 +44,14 @@ APP_NAME = "SteamTransparent"
 CONFIG_DIR = os.path.expanduser(f"~/.config/{APP_NAME}")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
+# Titlebar alpha, same knob style as PySpotify (SPOTIFY_TITLEBAR_ALPHA).
+# 0.0 = clear, 1.0 = solid. Override per-run with:
+#   STEAM_TITLEBAR_ALPHA=0.4 ./run.sh
+try:
+    _TB_ALPHA = max(0.0, min(1.0, float(os.environ.get("STEAM_TITLEBAR_ALPHA", "0.65"))))
+except ValueError:
+    _TB_ALPHA = 0.65
+
 
 # ---------------------------------------------------------------------------
 # Look: colorless translucent theme matching the Spotify wrapper.
@@ -270,39 +278,66 @@ ONLINE_STATE_LABELS = {
 
 
 class TitleBar(QWidget):
-    # Darker than the body, matching PySpotify: near-opaque dark fill
-    # painted directly (rgba(12,12,14,~0.84)) over the translucent body.
-    _FILL = QColor(12, 12, 14, 215)
+    # Identical fill to PySpotify's titlebar (same RGB + same default
+    # alpha) so both bars render pixel-identical over the same backdrop.
+    # Tune with STEAM_TITLEBAR_ALPHA (default 0.65).
+
+    # Discord/ClearVision-style controls, kept in sync with PySpotify.
+    BTN_BASE = (
+        "QPushButton { color: #b9bbbe; background: transparent; "
+        "border: none; font-size: 16px; }"
+        "QPushButton:hover { color: white; background: rgba(255,255,255,25); }"
+    )
+    BTN_MAX = (
+        "QPushButton { color: #b9bbbe; background: transparent; "
+        "border: none; font-size: 11px; }"
+        "QPushButton:hover { color: white; background: rgba(255,255,255,25); }"
+    )
+    BTN_CLOSE = (
+        "QPushButton { color: #b9bbbe; background: transparent; "
+        "border: none; font-size: 18px; }"
+        "QPushButton:hover { color: white; background: #ed4245; }"
+    )
 
     def __init__(self, parent_window, title="Steam"):
         super().__init__(parent_window)
         self._parent_window = parent_window
-        self.setFixedHeight(28)
+        self.setFixedHeight(30)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 8, 0)
+        layout.setContentsMargins(10, 0, 0, 0)
+        layout.setSpacing(0)
 
         label = QLabel(title)
-        label.setStyleSheet("color: white; font-weight: bold; background: transparent;")
+        label.setStyleSheet(
+            "color: #b9bbbe; font-weight: bold; background: transparent;")
         layout.addWidget(label)
         layout.addStretch()
 
-        min_btn = QPushButton("_")
-        close_btn = QPushButton("x")
-        for b in (min_btn, close_btn):
-            b.setFixedSize(24, 24)
-            b.setStyleSheet(
-                "QPushButton { color: white; background: rgba(255,255,255,30); border: none; border-radius: 4px; }"
-                "QPushButton:hover { background: rgba(255,255,255,70); }"
-            )
+        min_btn = QPushButton("–")
+        max_btn = QPushButton("□")
+        close_btn = QPushButton("×")
+        for b in (min_btn, max_btn, close_btn):
+            b.setFixedSize(34, 30)
             layout.addWidget(b)
+        min_btn.setStyleSheet(self.BTN_BASE)
+        max_btn.setStyleSheet(self.BTN_MAX)
+        close_btn.setStyleSheet(self.BTN_CLOSE)
         min_btn.clicked.connect(parent_window.showMinimized)
+        max_btn.clicked.connect(self._toggle_max)
         close_btn.clicked.connect(parent_window.close)
+
+    def _toggle_max(self):
+        w = self._parent_window
+        try:
+            w.showNormal() if w.isMaximized() else w.showMaximized()
+        except Exception:
+            pass
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), self._FILL)
+        p.fillRect(self.rect(), QColor(12, 12, 14, int(_TB_ALPHA * 255)))
         super().paintEvent(event)
 
     def mousePressEvent(self, event):
@@ -402,7 +437,7 @@ class PropertiesDialog(QDialog):
         for _ in range(20):
             time.sleep(0.5)
             if not steam_api.is_steam_running():
-                self._main._set_status("Steam closed for settings edit.")
+                self._main._maybe_shutdown_steam("Steam closed for settings edit.")
                 return True
         QMessageBox.warning(self, "Still running",
                             "Steam didn't exit in time — try again.")
@@ -573,7 +608,7 @@ class PropertiesDialog(QDialog):
 
     def _verify(self):
         steam_api.validate_game(self.appid)
-        self._main._set_status(f"Verifying {self.game_name} in Steam…")
+        self._main._maybe_shutdown_steam(f"Verifying {self.game_name} in Steam…")
 
     def _browse(self):
         if not steam_api.open_game_folder(self.appid):
@@ -597,14 +632,24 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
 
         central = QWidget()
-        central.setStyleSheet(
-            "background: " + STEAM_BG + "; border-radius: 8px;")
+        # Transparent: the titlebar paints its own fill directly over the
+        # desktop (exactly like PySpotify). If it sat on a painted body,
+        # the two alpha layers would stack and render darker.
+        central.setStyleSheet("background: transparent;")
         self.setCentralWidget(central)
 
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(TitleBar(self))
+
+        content = QWidget()
+        content.setStyleSheet("background: " + STEAM_BG + ";")
+        outer.addWidget(content, 1)
+        self._content = content
+        inner = QVBoxLayout(content)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(0)
 
         # Make sure the real Steam client is alive so steam:// launches work.
         # Hidden (tray-only via -silent): no main window, downloads and
@@ -620,7 +665,7 @@ class MainWindow(QMainWindow):
         body = QWidget()
         body.setStyleSheet("background: transparent;")
         body_layout = QVBoxLayout(body)
-        outer.addWidget(body)
+        inner.addWidget(body, 1)
 
         # Top-level nav like the real client: STORE / LIBRARY / COMMUNITY.
         nav_row = QHBoxLayout()
@@ -783,18 +828,27 @@ class MainWindow(QMainWindow):
 
         self._show_page("LIBRARY")
 
-        # Status line: Steam client state + background-op progress.
-        self.status_label = QLabel("Steam: hidden (tray only)")
-        self.status_label.setStyleSheet("color: " + STEAM_DIM + "; padding: 4px 2px;")
-        body_layout.addWidget(self.status_label)
-
-        grip = QSizeGrip(self)
-        outer.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        # Floating corner grip (no layout row, so no empty transparent
+        # strip under the content). Positioned in resizeEvent.
+        self._grip = QSizeGrip(content)
+        self._grip.setFixedSize(12, 12)
+        self._grip.raise_()
+        self._grip.show()
 
         self._all_games = []
         self._details_cache = {}  # appid -> store details (hero, blurb)
         self.reload_library()
         self.reload_friends()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        grip = getattr(self, "_grip", None)
+        if grip is not None:
+            m = 4
+            grip.move(
+                self._content.width() - grip.width() - m,
+                self._content.height() - grip.height() - m,
+            )
 
     def _style_list(self, widget: QListWidget):
         widget.setStyleSheet(
@@ -854,9 +908,6 @@ class MainWindow(QMainWindow):
         appid = item.data(Qt.ItemDataRole.UserRole)
         steam_api.launch_game(appid)
         # A launched game needs the client alive -- no auto-shutdown here.
-
-    def _set_status(self, text):
-        self.status_label.setText(text)
 
     def _show_page(self, label):
         idx = {"STORE": 1, "LIBRARY": 0, "COMMUNITY": 2}[label]
@@ -958,9 +1009,6 @@ class MainWindow(QMainWindow):
         themselves, and never called from the launch path."""
         if self._steam_we_started and steam_api.is_steam_running():
             steam_api.shutdown()
-            self._set_status(f"Steam closed ({reason}) — not using compute.")
-        else:
-            self._set_status(f"{reason} — Steam left running.")
 
     def _selected_game(self):
         item = self.library_list.currentItem()
@@ -1028,9 +1076,9 @@ class MainWindow(QMainWindow):
             return
         # Steam pops its own location-picker dialog for this (can't be
         # suppressed); the watcher picks up once the download starts.
-        self._set_status(f"Waiting for install confirm: {name}…")
+        pass
         self._watcher = SteamOpWatcher(appid, "install", name)
-        self._watcher.update.connect(self._set_status)
+        self._watcher.update.connect(lambda _: None)
         self._watcher.done.connect(self._on_op_done)
         self._watcher.start()
 
@@ -1054,9 +1102,9 @@ class MainWindow(QMainWindow):
         except steam_api.SteamAPIError as e:
             QMessageBox.warning(self, "Uninstall failed", str(e))
             return
-        self._set_status(f"Uninstalling {name}…")
+        pass
         self._watcher = SteamOpWatcher(appid, "uninstall", name)
-        self._watcher.update.connect(self._set_status)
+        self._watcher.update.connect(lambda _: None)
         self._watcher.done.connect(self._on_op_done)
         self._watcher.start()
 
@@ -1065,7 +1113,6 @@ class MainWindow(QMainWindow):
             self.reload_library()
             self._maybe_shutdown_steam(message)
         else:
-            self._set_status(message)
             QMessageBox.warning(self, "Steam operation", message)
 
     # --- Store / Community (client UI via steam://openurl/) ------------
@@ -1108,7 +1155,6 @@ class MainWindow(QMainWindow):
         term = self.store_box.text().strip()
         if not term:
             return
-        self._set_status(f"Searching store for “{term}”…")
         self.store_loader = StoreSearchLoader(term)
         self.store_loader.loaded.connect(self.on_store_loaded)
         self.store_loader.failed.connect(
@@ -1132,8 +1178,6 @@ class MainWindow(QMainWindow):
             return ""
 
     def on_store_loaded(self, term, results):
-        self._set_status(f"Store: {len(results)} results for “{term}”. "
-                         "Double-click to open in Steam.")
         self.store_list.clear()
         for r in results:
             label = r.get("name", f"App {r.get('id')}")

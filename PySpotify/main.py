@@ -30,7 +30,7 @@ import re
 DEBUG = os.environ.get("SPOTIFY_DEBUG", "0") == "1"
 
 try:
-    from PyQt6.QtCore import Qt, QUrl, QTimer
+    from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal
     from PyQt6.QtGui import QColor, QPainter
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -56,6 +56,11 @@ SPOTIFY_URL = "https://open.spotify.com"
 
 # Persistent profile storage location, so login survives restarts.
 PROFILE_DIR = os.path.expanduser(f"~/.local/share/{APP_NAME}")
+
+# Lyrics provider keys (Musixmatch/Vagalume/Genius), saved from the
+# panel's settings view. Env vars remain as fallback defaults.
+LYRICS_CONFIG_DIR = os.path.expanduser("~/.config/SpotifyTransparent")
+LYRICS_KEYS_PATH = os.path.join(LYRICS_CONFIG_DIR, "lyrics_keys.json")
 
 # 0.0 = fully clear, 1.0 = solid black. Override per-run with:
 #   SPOTIFY_BG_ALPHA=0.85 ./run.sh
@@ -149,12 +154,9 @@ main, aside, header,
     background-image: none !important;
     box-shadow: none !important;
 }}
-/* Bottom player bar: stock solid fill, copied from the official client.
-   The web footer's own buttons/sliders are used as-is (no JS bridging),
-   so everything works. Solid (not translucent) on purpose: translucent
-   layers mis-composite here and read as a broken clear strip.
-   Pinned fixed: the root is display:block, so sticky/margin anchoring
-   can't hold the bar above the fold at small heights. */
+/* Bottom player bar: translucent like the titlebar (same alpha), so it
+   blends instead of sitting as an opaque strip. Bumped specifity-free:
+   single rule, !important wins ties. */
 footer,
 [data-testid="now-playing-bar"],
 [data-testid*="now-playing"],
@@ -164,7 +166,7 @@ div[class*="player"],
 div[class*="Player"],
 div[class*="playbar"],
 div[class*="Playback"] {{
-    background-color: #0a0a0c !important;
+    background-color: rgba(10, 10, 12, {_TB_ALPHA:.2f}) !important;
     background-image: none !important;
     box-shadow: none !important;
     flex-shrink: 0 !important;
@@ -176,6 +178,23 @@ div[class*="Playback"] {{
     right: 0 !important;
     z-index: 100 !important;
     margin-top: 0 !important;
+}}
+/* Marketing footer: a huge slab that serves no purpose in the app --
+   hide it, unless it ever wraps the player bar itself (:has guard
+   keeps the player safe). */
+footer:not(:has([data-testid="now-playing-bar"])) {{
+    display: none !important;
+}}
+/* Inner player cells (track info, controls group) keep stock
+   near-black fills through the exclusions above, rendering as darker
+   patches against the translucent bar. Clear them all so the bar's own
+   fill is the single backdrop. Doubled testid outbids Encore's
+   two-class rules; slider track/fills are repainted inline by JS
+   (inline !important wins over everything). */
+[data-testid="now-playing-bar"][data-testid="now-playing-bar"] div {{
+    background-color: transparent !important;
+    background-image: none !important;
+    box-shadow: none !important;
 }}
 /* Room for the fixed bar so page content isn't hidden behind it. */
 [data-testid="root"] {{
@@ -208,6 +227,15 @@ footer a img,
    the broad transparency rule above carries ~30 :not()s, so any
    stylesheet rule loses the !important specificity war. Inline
    !important via JS outranks everything. */
+/* Stock lyrics buttons: hidden since our own LYRICS panel replaces
+   them (multi-provider, synced). Our button has no aria-label and a
+   py- id, so it survives these rules. */
+button[aria-label*="lyric" i]:not(#py-lyrics-btn),
+a[aria-label*="lyric" i],
+[data-testid*="lyric-button"],
+div[role="menuitem"][aria-label*="lyric" i] {{
+    display: none !important;
+}}
 /* Now Playing sidebar showcase: big centered artwork, larger track text.
    Multiple candidate selectors since Spotify renames this panel often. */
 aside[aria-label*="Now playing" i],
@@ -259,7 +287,7 @@ div[class*="scroll-node"],
    behind them provides the fill. Giving every nested div its own alpha
    layer stacks (0.65 over 0.65 over 0.65 = near-black), which is why it
    looked solid dark. Panel/slider elements are excluded below. */
-.Root div:not([data-testid="root"]):not([data-testid="topbar"]):not([data-testid="now-playing-bar"]):not([data-testid*="now-playing"]):not([data-testid*="player"]):not([data-testid="left-sidebar"]):not([data-testid="main-view"]):not([data-testid*="right-sidebar"]):not([data-testid*="progress"]):not([data-testid*="volume"]):not([class*="Root__"]):not([class*="main-view"]):not([class*="nav-bar"]):not([class*="now-playing"]):not([class*="player"]):not([class*="Player"]):not([class*="playbar"]):not([class*="Playback"]):not([class*="progress" i]):not([class*="slider" i]):not([class*="volume" i]):not([class*="right-sidebar"]):not([class*="RightSidebar"]):not([class*="top-bar"]):not([class*="YourLibrary"]):not([class*="card"]):not([class*="Card"]):not([role="slider"]),
+.Root div:not([data-testid="root"]):not([data-testid="now-playing-bar"]):not([data-testid*="now-playing"]):not([data-testid*="player"]):not([data-testid="left-sidebar"]):not([data-testid="main-view"]):not([data-testid*="right-sidebar"]):not([data-testid*="progress"]):not([data-testid*="volume"]):not([class*="Root__"]):not([class*="main-view"]):not([class*="nav-bar"]):not([class*="now-playing"]):not([class*="player"]):not([class*="Player"]):not([class*="playbar"]):not([class*="Playback"]):not([class*="progress" i]):not([class*="slider" i]):not([class*="volume" i]):not([class*="right-sidebar"]):not([class*="RightSidebar"]):not([class*="top-bar"]):not([class*="YourLibrary"]):not([class*="card"]):not([class*="Card"]):not([role="slider"]),
 .Root section:not([data-testid="now-playing-bar"]):not([data-testid*="now-playing"]):not([data-testid*="player"]):not([class*="now-playing"]):not([class*="player"]):not([class*="Player"]),
 .Root article:not([data-testid="now-playing-bar"]):not([data-testid*="player"]),
 .Root ul, .Root li {{
@@ -505,6 +533,7 @@ def build_inject_script(css: str) -> QWebEngineScript:
             try {{
                 var nodes = document.querySelectorAll('button, a, h1, h2, h3, h4, span, p');
                 for (var i = 0; i < nodes.length; i++) {{
+                    if (nodes[i].id === 'py-lyrics-btn') continue;  // ours
                     var t = (nodes[i].innerText || '').trim();
                     if (!t || t.length > 60) continue;
                     var low = t.toLowerCase();
@@ -512,7 +541,8 @@ def build_inject_script(css: str) -> QWebEngineScript:
                         t === 'Browse' ||
                         low === 'go premium' || low === 'get premium' ||
                         low === 'try premium free' || low === 'start a free trial' ||
-                        low === 'get 3 months free' || low.indexOf('premium free') !== -1) {{
+                        low === 'get 3 months free' || low.indexOf('premium free') !== -1 ||
+                        low === 'lyrics' || low === 'show lyrics') {{
                         var holder = nodes[i].closest('button, a');
                         if (holder) holder.style.display = 'none';
                     }} else if (t.indexOf('Download Spotify for Linux') !== -1) {{
@@ -721,6 +751,73 @@ def build_inject_script(css: str) -> QWebEngineScript:
             }} catch (e) {{ console.log('[sliderprobe] err ' + e); }}
         }}
         if (DEBUGJS) setTimeout(probeSliders, 10000);
+        // Strip identifier: what's actually painted below the player
+        // bar (button rect + bar flex + elementFromPoint rows).
+        function probeStrip() {{
+            try {{
+                var b = document.getElementById('py-lyrics-btn');
+                if (b) {{
+                    var r = b.getBoundingClientRect();
+                    console.log('[stripprobe] lyrics-btn rect x=' + Math.round(r.x) +
+                        ' y=' + Math.round(r.y) + ' w=' + Math.round(r.width) +
+                        ' h=' + Math.round(r.height));
+                }} else console.log('[stripprobe] lyrics-btn missing');
+                var np = document.querySelector('[data-testid="now-playing-bar"]');
+                if (np) {{
+                    var cs = getComputedStyle(np);
+                    console.log('[stripprobe] bar flexwrap=' + cs.flexWrap +
+                        ' align=' + cs.alignItems + ' overflow=' + cs.overflow);
+                }}
+                var vh = window.innerHeight;
+                // Identify every BUTTON inside the player bar by id/rect,
+                // plus the full ancestor chain of the bottom-most one.
+                try {{
+                    var np2 = document.querySelector(
+                        '[data-testid="now-playing-bar"]');
+                    // Direct children of the bar: finds the mystery row.
+                    var ch = np2 ? np2.children : [];
+                    for (var ci = 0; ci < ch.length; ci++) {{
+                        var cr = ch[ci].getBoundingClientRect();
+                        var cbg = '';
+                        try {{ cbg = getComputedStyle(ch[ci]).backgroundColor; }}
+                        catch (e) {{}}
+                        console.log('[stripprobe] row' + ci + ' tag=' +
+                            ch[ci].tagName + ' tid=' +
+                            (ch[ci].getAttribute('data-testid') || '') +
+                            ' cls=' + String(ch[ci].className || '').slice(0, 50) +
+                            ' rect=' + Math.round(cr.x) + ',' +
+                            Math.round(cr.y) + ',' + Math.round(cr.width) +
+                            'x' + Math.round(cr.height) + ' bg=' + cbg);
+                    }}
+                    var btns = np2 ? np2.querySelectorAll('button') : [];
+                    for (var bi = 0; bi < btns.length; bi++) {{
+                        var br = btns[bi].getBoundingClientRect();
+                        console.log('[stripprobe] btn' + bi + ' id=' +
+                            (btns[bi].id || '(none)') + ' label=' +
+                            ((btns[bi].getAttribute('aria-label') || '') +
+                             '|' + (btns[bi].innerText || '').trim()).slice(0, 40) +
+                            ' rect=' + Math.round(br.x) + ',' +
+                            Math.round(br.y) + ',' + Math.round(br.width) +
+                            'x' + Math.round(br.height));
+                    }}
+                    var yb = vh - 8;
+                    var deep = document.elementFromPoint(
+                        Math.round(window.innerWidth / 2), yb);
+                    var chain = [];
+                    var p = deep;
+                    while (p && chain.length < 6) {{
+                        chain.push(p.tagName +
+                            (p.id ? '#' + p.id : '') +
+                            (p.getAttribute('data-testid') ?
+                                '[tid=' + p.getAttribute('data-testid') + ']' : ''));
+                        p = p.parentElement;
+                    }}
+                    console.log('[stripprobe] bottom chain: ' +
+                                chain.join(' < '));
+                }} catch (e) {{ console.log('[stripprobe] btnerr ' + e); }}
+            }} catch (e) {{ console.log('[stripprobe] err ' + e); }}
+        }}
+        if (DEBUGJS) setTimeout(probeStrip, 11000);
         // SpicyTracker port: strip ?si= tracking from Spotify share links,
         // both copy-event and clipboard-API paths.
         var _copyHooked = false;
@@ -912,7 +1009,10 @@ def build_adskip_script() -> QWebEngineScript:
         }}
         function hookPlayer() {{
             if (_lpClass) return true;
-            if (_tries++ > 120) {{ log('ListPlayer not found after 120 tries, DOM fallback only'); return false; }}
+            // No give-up: the tick throttles calls to ~every 2s, so this
+            // just keeps trying across player-bundle reloads.
+            _tries++;
+            if (_tries % 30 === 1) log('ListPlayer hook attempt ' + _tries);
             var req = getReq();
             if (!req) return false;
             var cls = findListPlayer(req);
@@ -922,19 +1022,13 @@ def build_adskip_script() -> QWebEngineScript:
                 var origLoad = cls.prototype.load;
                 cls.prototype.load = function(list) {{
                     try {{ _lp = this; }} catch (e) {{}}
-                    // Pre-mute synchronously when the incoming track is an
-                    // ad: the load hook fires before playback starts, so
-                    // this kills the 1-2s audible blip before the skip
-                    // lands. Interval below unmutes + advances.
-                    try {{
-                        var tr = (list && list._tracks && list._tracks[0]) ||
-                                 (list && list.tracks && list.tracks[0]) || null;
-                        var u = (tr && tr.uri) || '';
-                        if (u.indexOf('spotify:ad:') !== -1 ||
-                            u.indexOf(':ad:') !== -1) {{
-                            setMediaMuted(true); log('pre-muted ad at load');
-                        }}
-                    }} catch (e) {{}}
+                    // Pre-mute EVERY load at full strength (elements +
+                    // volume slider to zero): element muting alone is a
+                    // proven no-op in this player, so the slider is the
+                    // only mute that bites. The tick restores volume
+                    // within ~100ms on positive music ID -- a dip no
+                    // longer than a crossfade.
+                    try {{ setMediaMuted(true, true); }} catch (e) {{}}
                     return origLoad.apply(this, arguments);
                 }};
                 // Player may already exist (late hook): grab via load hook
@@ -971,17 +1065,86 @@ def build_adskip_script() -> QWebEngineScript:
             }} catch (e) {{}}
             return false;
         }}
-        function setMediaMuted(muted) {{
+        // Stitched/in-episode ads (podcast host-reads, BBC-style dynamic
+        // inserts): baked into the episode stream, so no track change, no
+        // contentType, no load event -- the track-level skipper is blind.
+        // The player UI still badges them. MUTE ONLY here: skipping would
+        // nuke the whole episode.
+        function stitchedSignals() {{
             try {{
-                var els = document.querySelectorAll('audio,video');
+                var zones = document.querySelectorAll(
+                    '[data-testid="now-playing-bar"],' +
+                    '[data-testid*="player"],[data-testid*="episode"]');
+                for (var i = 0; i < zones.length; i++) {{
+                    if (zones[i].querySelector('a[href*=":ad:"]')) return true;
+                    var txt = (zones[i].innerText || '').toLowerCase();
+                    if (txt.indexOf('advertisement') !== -1) return true;
+                }}
+            }} catch (e) {{}}
+            return false;
+        }}
+        function setMediaMuted(muted, full) {{
+            // full=true also zeroes the volume slider (React-driven) and
+            // restores it on unmute. Media-only mode just flags elements.
+            try {{
+                var els = allMedia();
                 for (var i = 0; i < els.length; i++) {{
                     try {{
                         if (els[i].muted !== muted) els[i].muted = muted;
                     }} catch (x) {{}}
                 }}
+                var vi = document.querySelector(
+                    '[data-testid="volume-bar"] input[type="range"]');
+                if (vi && full) {{
+                    if (muted) {{
+                        if (_savedVol === null || _savedVol === undefined)
+                            _savedVol = vi.value;
+                        if (String(vi.value) !== '0') {{
+                            vi.value = 0;
+                            fireInput(vi);
+                        }}
+                    }} else if (_savedVol !== null &&
+                               _savedVol !== undefined) {{
+                        vi.value = _savedVol;
+                        fireInput(vi);
+                        _savedVol = null;
+                    }}
+                }}
                 _mutedByUs = muted;
             }} catch (e) {{}}
         }}
+        // Media elements incl. shadow DOM: the player keeps its <audio>
+        // out of the light DOM (media count=0 there), which is why the
+        // old light-DOM-only mute was a silent no-op.
+        var _mediaCache = null, _mediaCacheT = 0;
+        function allMedia() {{
+            try {{
+                if (_mediaCache && Date.now() - _mediaCacheT < 10000)
+                    return _mediaCache;
+                var out = [];
+                function scan(root) {{
+                    try {{
+                        var els = root.querySelectorAll('audio,video');
+                        for (var i = 0; i < els.length; i++) out.push(els[i]);
+                        var all = root.querySelectorAll('*');
+                        for (var j = 0; j < all.length; j++) {{
+                            if (all[j].shadowRoot) scan(all[j].shadowRoot);
+                            if (j > 4000) break;  // sanity cap
+                        }}
+                    }} catch (e) {{}}
+                }}
+                scan(document);
+                _mediaCache = out; _mediaCacheT = Date.now();
+                return out;
+            }} catch (e) {{ return []; }}
+        }}
+        function fireInput(el) {{
+            try {{ el.dispatchEvent(new Event('input', {{bubbles: true}})); }}
+            catch (e) {{}}
+            try {{ el.dispatchEvent(new Event('change', {{bubbles: true}})); }}
+            catch (e) {{}}
+        }}
+        var _savedVol = null;
         function clickSkip() {{
             try {{
                 var b = document.querySelector('[data-testid="control-button-skip-forward"]') ||
@@ -992,11 +1155,156 @@ def build_adskip_script() -> QWebEngineScript:
             }} catch (e) {{}}
             return false;
         }}
+        function setUiLock(on) {{
+            try {{
+                var ov = document.getElementById('py-ui-lock');
+                if (on) {{
+                    if (!ov) {{
+                        ov = document.createElement('div');
+                        ov.id = 'py-ui-lock';
+                        ov.style.cssText = 'position:fixed;left:0;right:0;' +
+                            'bottom:0;height:120px;z-index:150;' +
+                            'background:rgba(10,10,12,0.45);display:flex;' +
+                            'align-items:center;justify-content:center;' +
+                            'color:#fff;font-weight:bold;font-size:14px;' +
+                            'cursor:not-allowed;';
+                        ov.textContent = 'Recording lyrics — controls locked';
+                        ov.addEventListener('click', function(e) {{
+                            try {{ e.stopPropagation(); e.preventDefault(); }}
+                            catch (x) {{}}
+                        }}, true);
+                        (document.body || document.documentElement)
+                            .appendChild(ov);
+                    }}
+                    ov.style.display = 'flex';
+                }} else if (ov) {{
+                    ov.style.display = 'none';
+                }}
+            }} catch (e) {{}}
+        }}
         var _skipCool = 0;
+        var _hookTick = 0;
         setInterval(function() {{
             try {{
-                if (!_lpClass) hookPlayer();
+                // Retry the hook forever (throttled: full webpack scan
+                // every ~2s, not every tick) so a late-loading player
+                // bundle still gets captured instead of giving up.
+                if (!_lpClass && (++_hookTick % 20 === 1)) hookPlayer();
+                // Seek bridge (live-record transcription): Python asks
+                // for a restart-to-0 via window.__pySeekReq. Verified
+                // loop, not fire-and-forget: position is read back every
+                // tick and methods retried until it lands < 3% (8s cap).
+                // Method: skip-back button when far in (stock Spotify
+                // restarts the track past ~3s), player API + Home key
+                // otherwise. Plain clicks only -- synthetic pointer
+                // events caused drag-capture following the real cursor.
+                try {{
+                    var sq = window.__pySeekReq;
+                    if (sq) {{
+                        window.__pySeekReq = null;
+                        window.__pySeekWant = {{ms: sq.ms || 0,
+                            until: Date.now() + 8000, cool: 0}};
+                    }}
+                }} catch (e) {{}}
+                try {{
+                    var sw = window.__pySeekWant;
+                    if (sw) {{
+                        if (Date.now() > sw.until) {{
+                            window.__pySeekWant = null;
+                            log('seek gave up');
+                        }} else {{
+                            var pos = readPosFrac();
+                            if (pos !== null && pos < 3) {{
+                                window.__pySeekWant = null;
+                                log('seek ok at ' + pos + '%');
+                            }} else if (Date.now() > sw.cool) {{
+                                var hasSeek = false;
+                                try {{ hasSeek = !!(_lp && _lp.seek); }}
+                                catch (e) {{}}
+                                var sbFound = false, barFound = false;
+                                try {{
+                                    sbFound = !!(document.querySelector(
+                                        '[data-testid="control-button-skip-back"]') ||
+                                                 document.querySelector(
+                                        '[data-testid*="skip-back"]'));
+                                    barFound = !!(document.querySelector(
+                                        '[data-testid="progress-bar-background"]'));
+                                }} catch (e) {{}}
+                                if (!sw.dbgT || Date.now() - sw.dbgT > 2000) {{
+                                    sw.dbgT = Date.now();
+                                    log('seek try pos=' + pos + '% player=' +
+                                        (!!_lp) + ' seekFn=' + hasSeek +
+                                        ' skipback=' + sbFound +
+                                        ' bar=' + barFound);
+                                }}
+                                    try {{
+                                        var pr = _lp.seek(sw.ms || 0);
+                                        if (pr && pr.catch)
+                                            pr.catch(function() {{}});
+                                    }} catch (e) {{}}
+                                if (pos !== null && pos > 5) {{
+                                    try {{
+                                        var sb = document.querySelector(
+                                            '[data-testid="control-button-skip-back"]') ||
+                                                 document.querySelector(
+                                            '[data-testid*="skip-back"]');
+                                        if (sb) {{ sb.click(); sw.cool = Date.now() + 2500; }}
+                                    }} catch (e) {{}}
+                                }} else {{
+                                    try {{
+                                        var bar = document.querySelector(
+                                            '[data-testid="progress-bar-background"]');
+                                        if (bar) {{
+                                            try {{ bar.focus(); }} catch (e) {{}}
+                                            bar.dispatchEvent(new KeyboardEvent(
+                                                'keydown', {{key: 'Home',
+                                                            code: 'Home',
+                                                            bubbles: true,
+                                                            cancelable: true}}));
+                                        }}
+                                    }} catch (e) {{}}
+                                }}
+                            }}
+                        }}
+                    }}
+                }} catch (e) {{}}
+                function readPosFrac() {{
+                    try {{
+                        var b = document.querySelector(
+                            '[data-testid="progress-bar"]');
+                        var st = b ? (b.getAttribute('style') || '') : '';
+                        var m = st.match(/--progress-bar-transform:\\s*([\\d.]+)%/);
+                        return m ? parseFloat(m[1]) : null;
+                    }} catch (e) {{ return null; }}
+                }}
+                // Play bridge: start playback if paused (recording or
+                // anything else that needs audio actually moving).
+                try {{
+                    if (window.__pyPlayReq) {{
+                        window.__pyPlayReq = null;
+                        var pb = document.querySelector(
+                            '[data-testid="play-button"]') ||
+                                 document.querySelector(
+                            '[data-testid*="playpause"]') ||
+                                 document.querySelector(
+                            '[data-testid="control-button-play"]');
+                        if (pb) {{
+                            var pl = (pb.getAttribute('aria-label') || '')
+                                     .toLowerCase();
+                            if (pl.indexOf('pause') === -1) {{
+                                pb.click(); log('play bridge: resumed');
+                            }}
+                        }}
+                    }}
+                }} catch (e) {{}}
+                // UI lock overlay for live recording: covers the player
+                // bar so seeks/skips can't ruin the take.
+                try {{
+                    if (window.__pyUiLock !== undefined)
+                        setUiLock(!!window.__pyUiLock);
+                }} catch (e) {{}}
                 var ad = isAdTrack() || (!_lp && domAdSuspect());
+                var stitched = !ad && stitchedSignals();
                 if (ad) {{
                     // Primary: player-level skip, completes the ad handshake.
                     if (_lp) {{
@@ -1011,12 +1319,28 @@ def build_adskip_script() -> QWebEngineScript:
                     }} else {{
                         clickSkip();
                     }}
-                    if (!_mutedByUs) {{ setMediaMuted(true); log('muted ad media'); }}
-                }} else if (_mutedByUs) {{
-                    setMediaMuted(false); log('unmuted (music back)');
+                    if (!_mutedByUs) {{ log('muted ad media'); }}
+                    setMediaMuted(true, true);
+                }} else if (stitched) {{
+                    // In-episode ad (podcast dynamic insert): the UI is
+                    // badged but the track is the episode itself -- mute
+                    // fully, NEVER skip (that would kill the episode).
+                    // Unmute is handled by the branch below once badges
+                    // clear (allowed without a track object when the
+                    // hook is absent, so mute can't stick).
+                    if (!_mutedByUs) {{ log('muted stitched ad'); }}
+                    setMediaMuted(true, true);
+                }} else if (_mutedByUs && !isAdTrack() &&
+                           (currentTrack() || !_lp)) {{
+                    // Unmute ONLY on positive music ID (a track object
+                    // that isn't an ad) -- never on "unknown", so a
+                    // pre-muted load can't unmute before the track
+                    // resolves. When nothing plays, staying muted is
+                    // harmless (no audio to mute).
+                    setMediaMuted(false, true); log('unmuted (music back)');
                 }}
             }} catch (e) {{}}
-        }}, 150);
+        }}, 100);
         log('adskip armed (MainWorld)');
         // Clipboard bridge: QtWebEngine's async clipboard can silently
         // swallow programmatic copies (Share -> Copy link). Stash every
@@ -1043,6 +1367,959 @@ def build_adskip_script() -> QWebEngineScript:
     """
     script = QWebEngineScript()
     script.setName("adskip-mainworld")
+    script.setSourceCode(js)
+    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+    script.setRunsOnSubFrames(False)
+    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+    return script
+
+
+def build_lyrics_script() -> QWebEngineScript:
+    """In-page lyrics panel (MainWorld): a Lyrics toggle button in the
+    player bar opens a synced-lyrics sidebar for the current track.
+
+    Providers, tried in order (keyless always run; key-based are baked
+    at launch from env and skipped silently when unset):
+      1. lrclib.net exact -- synced LRC, then plain (keyless).
+      2. lrclib.net search -- loose match the strict endpoint misses.
+      3. Netease -- synced LRC via CORS proxy (ported from lyrics-plus).
+      4. Musixmatch -- plain, via JSONP (SPOTIFY_MUSIXMATCH_KEY).
+      5. Vagalume -- plain (SPOTIFY_VAGALUME_KEY).
+      6. Genius -- plain, search API + page scrape (SPOTIFY_GENIUS_TOKEN).
+      7. lyrics.ovh -- plain (keyless).
+      8. ChartLyrics -- plain XML API (keyless).
+    Track identity comes from MediaSession metadata + the duration
+    label; position from --progress-bar-transform x duration. No
+    separate window, no crash surface: plain DOM + fetch.
+    """
+    js = f"""
+    (function() {{
+        if (window.__pyLyrics) return; window.__pyLyrics = true;
+        var DEBUGJS = {'true' if DEBUG else 'false'};
+        var panel = null, listEl = null, headEl = null;
+        var findBar = null, findInput = null, findHits = [], findIdx = -1;
+        // Follow mode (default): highlight + autoscroll to the sung
+        // line. FREE mode: static text, no jumping, no sync to worry
+        // about. Persisted with the lyrics config.
+        var follow = true;
+        var curKey = '', lines = [], synced = false;
+        function log(m) {{ if (DEBUGJS) console.log('[lyrics] ' + m); }}
+        function css() {{
+            if (document.getElementById('py-lyrics-style')) return;
+            var s = document.createElement('style');
+            s.id = 'py-lyrics-style';
+            s.textContent = '#py-lyrics-panel{{position:fixed;top:64px;right:12px;bottom:92px;width:340px;z-index:200;background:rgba(10,10,12,0.94);border:1px solid rgba(255,255,255,0.12);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;font-family:inherit}}'
+                + '#py-lyrics-head{{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,0.1);color:#fff;font-weight:bold;font-size:14px;display:flex;align-items:center}}'
+                + '#py-lyrics-title{{flex:1}}'
+                + '#py-lyrics-gear{{background:transparent;border:none;color:#9a9a9a;font-size:15px;cursor:pointer;padding:2px 6px;border-radius:4px}}'
+                + '#py-lyrics-gear:hover{{color:#fff}}'
+                + '#py-lyrics-follow{{background:transparent;border:none;color:#9a9a9a;font-size:10px;font-weight:bold;cursor:pointer;padding:2px 6px;border-radius:4px}}'
+                + '#py-lyrics-follow:hover{{color:#fff}}'
+                + '#py-lyrics-follow.off{{color:#555}}'
+                + '#py-lyrics-sub{{padding:6px 14px;color:#9a9a9a;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.08)}}'
+                + '#py-lyrics-list{{flex:1;overflow-y:auto;padding:10px 14px;color:#b3b3b3;font-size:14px;line-height:2}}'
+                + '#py-lyrics-list .w.onw{{color:#fff;font-weight:bold}}'
+                + '#py-lyrics-find{{display:none;padding:8px 14px;border-bottom:1px solid rgba(255,255,255,0.08)}}'
+                + '#py-lyrics-find input{{width:100%;box-sizing:border-box;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.16);border-radius:6px;color:#fff;padding:7px;font-size:13px}}'
+                + '#py-lyrics-list .hit{{color:#fff;text-decoration:underline}}'
+                + '#py-lyrics-list .cur-hit{{background:rgba(255,255,255,0.16);border-radius:4px}}'
+                + '#py-lyrics-list label{{display:block;color:#9a9a9a;font-size:11px;margin:10px 0 4px}}'
+                + '#py-lyrics-list input{{width:100%;box-sizing:border-box;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.16);border-radius:6px;color:#fff;padding:8px;font-size:13px}}'
+                + '#py-lyrics-save{{margin-top:14px;width:100%;background:rgba(255,255,255,0.16);border:none;border-radius:6px;color:#fff;font-weight:bold;padding:9px;cursor:pointer}}'
+                + '#py-lyrics-save:hover{{background:rgba(255,255,255,0.28)}}'
+                + '#py-lyrics-transcribe{{margin-top:12px;width:100%;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.16);border-radius:6px;color:#fff;padding:9px;cursor:pointer;font-size:13px}}'
+                + '#py-lyrics-transcribe:hover{{background:rgba(255,255,255,0.24)}}'
+                + '#py-lyrics-record,#py-lyrics-retry{{margin-top:8px;width:100%;background:transparent;border:1px solid rgba(255,255,255,0.16);border-radius:6px;color:#b3b3b3;padding:8px;cursor:pointer;font-size:12px}}'
+                + '#py-lyrics-record:hover,#py-lyrics-retry:hover{{color:#fff;background:rgba(255,255,255,0.1)}}'
+                + '#py-lyrics-btn{{flex:0 0 auto;align-self:center;white-space:nowrap;width:auto;max-width:max-content;background:transparent !important;border:none;color:#b3b3b3;font-size:11px;font-weight:bold;cursor:pointer;padding:6px 8px;border-radius:4px}}'
+                + '#py-lyrics-btn:hover{{color:#fff}}'
+                + '#py-lyrics-btn svg{{width:16px;height:16px;display:block;fill:currentColor}}';
+            document.head.appendChild(s);
+        }}
+        function trackInfo() {{
+            var title = '', artist = '', dur = 0;
+            try {{
+                var m = navigator.mediaSession && navigator.mediaSession.metadata;
+                if (m) {{ title = m.title || ''; artist = m.artist || ''; }}
+            }} catch (e) {{}}
+            try {{
+                var np = document.querySelector('[data-testid="now-playing-bar"]');
+                var times = np ? np.innerText.match(/\\d+:\\d+/g) : null;
+                if (times && times.length) dur = toSec(times[times.length - 1]);
+            }} catch (e) {{}}
+            return {{title: title, artist: artist, dur: dur,
+                     key: (title + '|' + artist).toLowerCase()}};
+        }}
+        function toSec(t) {{
+            var p = t.split(':');
+            return p.length === 2 ? (+p[0]) * 60 + (+p[1]) : 0;
+        }}
+        function position() {{
+            try {{
+                var bar = document.querySelector('[data-testid="progress-bar"]');
+                var st = bar ? (bar.getAttribute('style') || '') : '';
+                var m = st.match(/--progress-bar-transform:\\s*([\\d.]+)%/);
+                var frac = m ? parseFloat(m[1]) / 100 : 0;
+                var info = trackInfo();
+                return frac * (info.dur || 0);
+            }} catch (e) {{ return 0; }}
+        }}
+        function parseLRC(text) {{
+            var out = [];
+            var rows = String(text || '').split('\\n');
+            for (var i = 0; i < rows.length; i++) {{
+                var m = rows[i].match(/\\[(\\d+):(\\d+(?:\\.\\d+)?)\\](.*)/);
+                if (m) out.push({{t: (+m[1]) * 60 + (+m[2]), x: m[3].trim()}});
+            }}
+            out.sort(function(a, b) {{ return a.t - b.t; }});
+            return out;
+        }}
+        // Netease karaoke lines: [lineStart,lineDur](off,dur)word...
+        // offsets in ms relative to line start.
+        function parseKaraoke(text) {{
+            var out = [];
+            var rows = String(text || '').split('\\n');
+            for (var i = 0; i < rows.length; i++) {{
+                var lm = rows[i].match(/^\\[(\\d+),(\\d+)\\]/);
+                if (!lm) continue;
+                var start = (+lm[1]) / 1000;
+                var rest = rows[i].slice(lm[0].length);
+                var words = [], re = /\\((\\d+),(\\d+)\\)([^()]*)/g, m;
+                var anyWord = false, txt = '';
+                while ((m = re.exec(rest))) {{
+                    if (m[3] === '') continue;
+                    txt += m[3];
+                    words.push({{w: m[3], t: start + (+m[1]) / 1000}});
+                    if (m[3].trim() !== '') anyWord = true;
+                }}
+                if (anyWord) out.push({{t: start, x: txt, words: words}});
+            }}
+            return out;
+        }}
+        function render(statusLine) {{
+            if (!listEl) return;
+            listEl.innerHTML = '';
+            findHits = []; findIdx = -1;
+            if (!lines.length) {{
+                var d = document.createElement('div');
+                d.textContent = statusLine || 'No lyrics found for this track.';
+                listEl.appendChild(d); return;
+            }}
+            for (var i = 0; i < lines.length; i++) {{
+                var d = document.createElement('div');
+                d.dataset.i = i;
+                if (lines[i].words) {{
+                    // Karaoke line: one span per word for word-timing.
+                    for (var w = 0; w < lines[i].words.length; w++) {{
+                        var sp = document.createElement('span');
+                        sp.className = 'w';
+                        sp.textContent = lines[i].words[w].w;
+                        sp.dataset.t = lines[i].words[w].t;
+                        d.appendChild(sp);
+                    }}
+                }} else {{
+                    d.textContent = lines[i].x || '…';
+                }}
+                listEl.appendChild(d);
+            }}
+        }}
+        function sync() {{
+            if (!panel || !synced || !lines.length) return;
+            if (!follow) return;  // FREE mode: static text, no marks
+            var pos = position(), cur = 0;
+            for (var i = 0; i < lines.length; i++)
+                if (lines[i].t <= pos + 0.15) cur = i;
+            var kids = listEl.children;
+            for (var j = 0; j < kids.length; j++) {{
+                // classList (not className): preserve find-hit marks.
+                if (j === cur) kids[j].classList.add('on');
+                else kids[j].classList.remove('on');
+            }}
+            var line = lines[cur], el = kids[cur];
+            if (line && line.words && el) {{
+                var spans = el.querySelectorAll('span');
+                for (var s = 0; s < spans.length; s++) {{
+                    var wt = parseFloat(spans[s].dataset.t || '0');
+                    spans[s].className = 'w' + (wt <= pos + 0.05 ? ' onw' : '');
+                }}
+            }}
+            if (el && !(findBar && findBar.style.display === 'block' &&
+                        findInput && findInput.value))
+                el.scrollIntoView({{block: 'center', behavior: 'smooth'}});
+        }}
+        function clearSyncMarks() {{
+            if (!listEl) return;
+            try {{
+                var kids = listEl.children;
+                for (var i = 0; i < kids.length; i++) {{
+                    kids[i].classList.remove('on');
+                    var spans = kids[i].querySelectorAll('span.w');
+                    for (var j = 0; j < spans.length; j++)
+                        spans[j].classList.remove('onw');
+                }}
+            }} catch (e) {{}}
+        }}
+        function sub(t) {{ if (headEl) headEl.nextSibling.textContent = t; }}
+        // Provider chain. Keyless providers always run; key-based ones
+        // are baked at launch from env (empty = skipped silently):
+        //   SPOTIFY_MUSIXMATCH_KEY, SPOTIFY_VAGALUME_KEY
+        var MM_KEY = {json.dumps(os.environ.get("SPOTIFY_MUSIXMATCH_KEY", ""))};
+        var VAG_KEY = {json.dumps(os.environ.get("SPOTIFY_VAGALUME_KEY", ""))};
+        var GEN_KEY = {json.dumps(os.environ.get("SPOTIFY_GENIUS_TOKEN", ""))};
+        // Key resolution: settings UI (localStorage) wins, env-baked
+        // value is the fallback. Python mirrors localStorage to a JSON
+        // config file and re-seeds it on startup (see __pyLyricsKeys).
+        function K(kind) {{
+            var cfg = loadCfg();
+            var v = cfg.keys[kind];
+            if (v === undefined || v === null) {{
+                var env = {{mm: MM_KEY, vag: VAG_KEY, gen: GEN_KEY}};
+                return env[kind] || '';
+            }}
+            return v;
+        }}
+        function currentKeys() {{
+            var cfg = loadCfg();
+            return {{mm: cfg.keys.mm || '', vag: cfg.keys.vag || '',
+                     gen: cfg.keys.gen || ''}};
+        }}
+        // Config: {{keys:{{mm,vag,gen}}, order:[ids], off:{{id:true}}}}.
+        // Env-baked keys are defaults; settings UI overrides persist in
+        // localStorage and mirror to the Python JSON config file.
+        var PROV_ORDER = ['lrclib', 'lrclib-search', 'netease', 'mm',
+                          'vag', 'gen', 'ovh', 'chart'];
+        var PROV_NAMES = {{lrclib: 'lrclib exact', 'lrclib-search': 'lrclib search',
+                           netease: 'Netease', mm: 'Musixmatch', vag: 'Vagalume',
+                           gen: 'Genius', ovh: 'lyrics.ovh', chart: 'ChartLyrics'}};
+        function loadCfg() {{
+            var cfg = {{keys: {{mm: MM_KEY, vag: VAG_KEY, gen: GEN_KEY}},
+                        order: PROV_ORDER.slice(), off: {{}}, follow: true}};
+            try {{
+                var raw = localStorage.getItem('py-lyr-cfg');
+                if (raw) {{
+                    var s = JSON.parse(raw);
+                    if (s.keys) for (var k in s.keys) cfg.keys[k] = s.keys[k];
+                    if (s.order && s.order.length) {{
+                        // Stored order wins, but pick up providers added
+                        // after it was saved so they still run.
+                        cfg.order = s.order.filter(function(id) {{
+                            return PROV_ORDER.indexOf(id) !== -1;
+                        }});
+                        for (var p = 0; p < PROV_ORDER.length; p++)
+                            if (cfg.order.indexOf(PROV_ORDER[p]) === -1)
+                                cfg.order.push(PROV_ORDER[p]);
+                    }}
+                    if (s.off) cfg.off = s.off;
+                    if (s.follow !== undefined) cfg.follow = !!s.follow;
+                }} else {{
+                    // Migrate legacy per-slot keys.
+                    var l = {{mm: localStorage.getItem('py-mm'),
+                             vag: localStorage.getItem('py-vag'),
+                             gen: localStorage.getItem('py-gen')}};
+                    for (var k2 in l)
+                        if (l[k2] !== null) cfg.keys[k2] = l[k2];
+                }}
+            }} catch (e) {{}}
+            return cfg;
+        }}
+        function saveCfg(cfg) {{
+            try {{
+                localStorage.setItem('py-lyr-cfg', JSON.stringify(cfg));
+                // Python pump picks this up and writes the JSON config.
+                window.__pyLyricsKeysPending = JSON.stringify(cfg);
+                log('config saved');
+            }} catch (e) {{}}
+        }}
+        function plainRows(text) {{
+            return String(text || '').split('\\n').map(
+                function(x) {{ return {{t: 0, x: x}}; }}).filter(
+                function(r) {{ return r.x.trim() !== ''; }});
+        }}
+        // fetch() with a hard timeout: a stalled provider must fail
+        // over to the next, never freeze the chain (this was the 1/5
+        // hang -- lrclib stalling with no resolve/reject).
+        function fetchT(url, ms, opts) {{
+            return new Promise(function(res, rej) {{
+                var to = setTimeout(function() {{ rej(0); }}, ms || 9000);
+                fetch(url, opts).then(function(r) {{
+                    clearTimeout(to); res(r);
+                }}, function(e) {{ clearTimeout(to); rej(e || 0); }});
+            }});
+        }}
+        function jsonp(url, param) {{
+            // Musixmatch blocks CORS but allows JSONP script callbacks.
+            return new Promise(function(res, rej) {{
+                var cb = '__pymm' + Date.now() + Math.floor(Math.random() * 999);
+                var done = false;
+                function cleanup() {{
+                    if (done) return; done = true;
+                    try {{ delete window[cb]; }} catch (e) {{}}
+                    try {{ s.remove(); }} catch (e) {{}}
+                }}
+                window[cb] = function(d) {{ cleanup(); res(d); }};
+                var s = document.createElement('script');
+                s.onerror = function() {{ cleanup(); rej(0); }};
+                s.src = url + (url.indexOf('?') === -1 ? '?' : '&') +
+                        (param || 'callback') + '=' + cb;
+                document.head.appendChild(s);
+                setTimeout(function() {{ cleanup(); rej(0); }}, 12000);
+            }});
+        }}
+        function provLrclibSynced(info) {{
+            var q = 'artist_name=' + encodeURIComponent(info.artist) +
+                    '&track_name=' + encodeURIComponent(info.title) +
+                    '&duration=' + Math.round(info.dur || 0);
+            return fetchT('https://lrclib.net/api/get?' + q).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(d) {{
+                if (d && d.syncedLyrics) {{
+                    var rows = parseLRC(d.syncedLyrics);
+                    if (rows.length) return {{rows: rows, synced: true,
+                        label: 'Synced lyrics · via lrclib'}};
+                }}
+                if (d && d.plainLyrics) {{
+                    var rows = plainRows(d.plainLyrics);
+                    if (rows.length) return {{rows: rows, synced: false,
+                        label: 'Plain lyrics · via lrclib'}};
+                }}
+                throw 0;
+            }});
+        }}
+        // lrclib loose search: /api/get is strict and 404s on songs
+        // the database actually has (known lrclib quirk); /api/search
+        // finds them. First hit with synced LRC wins, else plain.
+        function provLrclibSearch(info) {{
+            var q = 'https://lrclib.net/api/search?q=' +
+                    encodeURIComponent(info.title + ' ' + info.artist);
+            return fetchT(q).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(arr) {{
+                if (!arr || !arr.length) throw 0;
+                for (var i = 0; i < Math.min(arr.length, 5); i++) {{
+                    var d = arr[i];
+                    if (d && d.syncedLyrics) {{
+                        var rows = parseLRC(d.syncedLyrics);
+                        if (rows.length) return {{rows: rows, synced: true,
+                            label: 'Synced lyrics · via lrclib search'}};
+                    }}
+                }}
+                for (var j = 0; j < Math.min(arr.length, 5); j++) {{
+                    var p = arr[j] && arr[j].plainLyrics;
+                    var rows = plainRows(p);
+                    if (rows.length) return {{rows: rows, synced: false,
+                        label: 'Plain lyrics · via lrclib search'}};
+                }}
+                throw 0;
+            }});
+        }}
+        // Netease (ported from Spicetify lyrics-plus, which reaches it
+        // through the xianqiao CORS proxy): huge catalog, synced LRC.
+        function provNetease(info) {{
+            var q = 'https://music.xianqiao.wang/neteaseapiv2/search' +
+                    '?limit=10&type=1&keywords=' +
+                    encodeURIComponent(info.title + ' ' + info.artist);
+            return fetchT(q).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(d) {{
+                var songs = d && d.result && d.result.songs;
+                if (!songs || !songs.length) throw 0;
+                var tw = words(info.title);
+                var pick = null;
+                for (var i = 0; i < songs.length && !pick; i++) {{
+                    var nw = words(songs[i].name);
+                    if (tw.some(function(w) {{ return nw.indexOf(w) !== -1; }}))
+                        pick = songs[i];
+                }}
+                if (!pick) pick = songs[0];
+                return fetchT('https://music.xianqiao.wang/neteaseapiv2/lyric?id=' +
+                              pick.id);
+            }}).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(d) {{
+                var lyric = d && d.lrc && d.lrc.lyric;
+                if (!lyric || lyric.indexOf('纯音乐') !== -1) throw 0;
+                var kara = null;
+                try {{
+                    var kl = d && d.klyric && d.klyric.lyric;
+                    if (kl) {{
+                        var kr = parseKaraoke(kl);
+                        if (kr.length > 3) kara = kr;
+                    }}
+                }} catch (e) {{ kara = null; }}
+                var rows = parseLRC(lyric);
+                if (!rows.length) {{
+                    rows = plainRows(lyric.replace(/\\[.*?\\]/g, ''));
+                    if (!rows.length) throw 0;
+                    return {{rows: rows, synced: false,
+                             label: 'Plain lyrics · via Netease'}};
+                }}
+                if (kara) return {{rows: kara, synced: true,
+                                   label: 'Karaoke · via Netease'}};
+                return {{rows: rows, synced: true,
+                         label: 'Synced lyrics · via Netease'}};
+            }});
+        }}
+        function provMusixmatch(info) {{
+            var key = K('mm');
+            if (!key) return Promise.reject(0);
+            var q = 'https://api.musixmatch.com/ws/1.1/matcher.lyrics.get' +
+                    '?format=jsonp&q_track=' + encodeURIComponent(info.title) +
+                    '&q_artist=' + encodeURIComponent(info.artist) +
+                    '&apikey=' + encodeURIComponent(key);
+            return jsonp(q).then(function(d) {{
+                var l = d && d.message && d.message.body &&
+                        d.message.body.lyrics;
+                var body = l && l.lyrics_body;
+                if (!body || (l.restricted && l.instrumental)) throw 0;
+                var clean = String(body).split('\\n').filter(function(x) {{
+                    return x.trim() !== '' &&
+                           x.indexOf('*******') !== 0 &&
+                           x.toLowerCase().indexOf('commercial use') === -1;
+                }}).join('\\n');
+                var rows = plainRows(clean);
+                if (!rows.length) throw 0;
+                return {{rows: rows, synced: false,
+                         label: 'Plain lyrics · via Musixmatch'}};
+            }});
+        }}
+        function provVagalume(info) {{
+            var key = K('vag');
+            if (!key) return Promise.reject(0);
+            var q = 'https://api.vagalume.com.br/search.php?art=' +
+                    encodeURIComponent(info.artist) + '&mus=' +
+                    encodeURIComponent(info.title) + '&apikey=' +
+                    encodeURIComponent(key);
+            return fetchT(q).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(d) {{
+                var mus = d && d.mus;
+                var txt = mus && mus[0] && (mus[0].text || mus[0].translate &&
+                         mus[0].translate[0] && mus[0].translate[0].text);
+                var rows = plainRows(txt);
+                if (!rows.length) throw 0;
+                return {{rows: rows, synced: false,
+                         label: 'Plain lyrics · via Vagalume'}};
+            }});
+        }}
+        function words(s) {{
+            return String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ')
+                .split(' ').filter(function(w) {{ return w.length > 2; }});
+        }}
+        function provGenius(info) {{
+            // Genius API finds the song URL (free token); the lyric text
+            // itself is scraped from the song page through a CORS proxy
+            // and read out of the [data-lyrics-container] divs.
+            var key = K('gen');
+            if (!key) return Promise.reject(0);
+            var q = 'https://api.genius.com/search?q=' +
+                    encodeURIComponent(info.title + ' ' + info.artist);
+            return fetchT(q, 9000,
+                {{headers: {{'Authorization': 'Bearer ' + key}}}}).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(d) {{
+                var hits = d && d.response && d.response.hits;
+                var top = hits && hits[0] && hits[0].result;
+                if (!top || !top.url) throw 0;
+                // Loose sanity check: top hit must share a significant
+                // word with the track or artist (wrong song is worse
+                // than no song).
+                var tw = words(info.title), aw = words(info.artist);
+                var hw = words(top.title).concat(words(top.primary_artist &&
+                                                       top.primary_artist.name));
+                var ok = tw.concat(aw).some(function(w) {{
+                    return hw.indexOf(w) !== -1;
+                }});
+                if (!ok) throw 0;
+                return fetchT('https://api.allorigins.win/raw?url=' +
+                              encodeURIComponent(top.url), 12000);
+            }}).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.text();
+            }}).then(function(html) {{
+                var doc = null;
+                try {{
+                    doc = new DOMParser().parseFromString(html, 'text/html');
+                }} catch (e) {{ throw 0; }}
+                var boxes = doc.querySelectorAll('[data-lyrics-container="true"]');
+                if (!boxes.length) throw 0;
+                var parts = [];
+                for (var i = 0; i < boxes.length; i++) {{
+                    var el = boxes[i].cloneNode(true);
+                    el.querySelectorAll('br').forEach(function(br) {{
+                        br.replaceWith(doc.createTextNode('\\n'));
+                    }});
+                    var t = (el.textContent || '').trim();
+                    if (t) parts.push(t);
+                }}
+                var rows = plainRows(parts.join('\\n'));
+                if (!rows.length) throw 0;
+                return {{rows: rows, synced: false,
+                         label: 'Plain lyrics · via Genius'}};
+            }});
+        }}
+        function provLyricsOvh(info) {{
+            return fetchT('https://api.lyrics.ovh/v1/' +
+                         encodeURIComponent(info.artist) + '/' +
+                         encodeURIComponent(info.title)).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.json();
+            }}).then(function(d) {{
+                var rows = plainRows(d && d.lyrics);
+                if (!rows.length) throw 0;
+                return {{rows: rows, synced: false,
+                         label: 'Plain lyrics · via lyrics.ovh'}};
+            }});
+        }}
+        function provChartLyrics(info) {{
+            var q = 'https://api.chartlyrics.com/apiv2.asmx/SearchLyricDirect' +
+                    '?artist=' + encodeURIComponent(info.artist) +
+                    '&song=' + encodeURIComponent(info.title);
+            return fetchT(q).then(function(r) {{
+                if (!r.ok) throw 0;
+                return r.text();
+            }}).then(function(t) {{
+                var doc = null;
+                try {{
+                    doc = new DOMParser().parseFromString(t, 'text/xml');
+                }} catch (e) {{ throw 0; }}
+                var el = doc && doc.getElementsByTagName('Lyric')[0];
+                var rows = plainRows(el && el.textContent);
+                if (!rows.length) throw 0;
+                return {{rows: rows, synced: false,
+                         label: 'Plain lyrics · via ChartLyrics'}};
+            }});
+        }}
+        // Auto-transcribe fallback: when no provider has the track,
+        // offer local Whisper AI transcription (Python side downloads
+        // YouTube audio + transcribes; result returns timestamped).
+        var transKey = '';
+        function offerTranscribe(info) {{
+            if (!listEl) return;
+            var b = document.createElement('button');
+            b.id = 'py-lyrics-transcribe';
+            b.textContent = 'Transcribe with local AI (slow)';
+            b.title = 'Downloads audio + runs Whisper locally. Takes minutes.';
+            b.onclick = function() {{ requestTranscribe(info, 'youtube'); }};
+            listEl.appendChild(b);
+            var r = document.createElement('button');
+            r.id = 'py-lyrics-record';
+            r.textContent = 'Or record the playing song (exact)';
+            r.title = 'Restarts the song and records it live. Guaranteed the right song; takes one full play plus transcription. Keep volume up.';
+            r.onclick = function() {{ requestTranscribe(info, 'record'); }};
+            listEl.appendChild(r);
+        }}
+        // video IDs already tried per track (wrong-song retries).
+        var transTried = {{}};
+        function requestTranscribe(info, mode) {{
+            try {{
+                transKey = info.key;
+                window.__pyTranscribeResult = null;
+                window.__pyTranscribeStatus = 'Requesting…';
+                window.__pyTranscribeReq = JSON.stringify({{
+                    title: info.title, artist: info.artist,
+                    dur: Math.round(info.dur || 0), key: info.key,
+                    mode: mode || 'youtube',
+                    exclude: transTried[info.key] || []}});
+                sub(mode === 'record' ? 'Recording requested — song restarts…'
+                                      : 'Transcription requested…');
+                log('transcribe requested (' + (mode || 'youtube') + ')');
+            }} catch (e) {{}}
+        }}
+        function pollTranscribe() {{
+            try {{
+                var st = window.__pyTranscribeStatus;
+                if (st && transKey && transKey === curKey) sub(String(st));
+                var tr = window.__pyTranscribeResult;
+                if (!tr || transKey !== curKey) return;
+                window.__pyTranscribeResult = null;
+                if (tr.error) {{
+                    render('Transcription failed: ' + tr.error);
+                    sub(''); offerTranscribe(trackInfo()); transKey = ''; return;
+                }}
+                if (tr.lines && tr.lines.length) {{
+                    lines = tr.lines; synced = true;
+                    render();
+                    var via = tr.video_title ? ' · ' + tr.video_title : '';
+                    sub((tr.label || 'Transcribed') + via);
+                    log('transcribed ' + lines.length + ' lines');
+                    if (tr.video_id && tr.video_id !== 'live-record') {{
+                        var arr = transTried[transKey] || [];
+                        if (arr.indexOf(tr.video_id) === -1)
+                            arr.push(tr.video_id);
+                        transTried[transKey] = arr;
+                        var rb = document.createElement('button');
+                        rb.id = 'py-lyrics-retry';
+                        rb.textContent = 'Wrong song? Try next match';
+                        rb.onclick = function() {{
+                            lines = []; render('Searching again…');
+                            requestTranscribe(trackInfo(), 'youtube');
+                        }};
+                        if (listEl) listEl.appendChild(rb);
+                    }}
+                    transKey = '';
+                }}
+            }} catch (e) {{}}
+        }}
+        function loadFor(info) {{
+            curKey = info.key; lines = []; synced = false;
+            render('Searching lyrics…');
+            sub(info.title + ' — ' + info.artist);
+            // All enabled providers fire at once in configured order;
+            // first usable result shows immediately, and a synced
+            // result later UPGRADES a plain one. Track change aborts
+            // everything via curKey.
+            var FNS = {{lrclib: provLrclibSynced,
+                        'lrclib-search': provLrclibSearch,
+                        netease: provNetease, mm: provMusixmatch,
+                        vag: provVagalume, gen: provGenius,
+                        ovh: provLyricsOvh, chart: provChartLyrics}};
+            var cfg = loadCfg();
+            var chain = [];
+            for (var i = 0; i < cfg.order.length; i++) {{
+                var id = cfg.order[i];
+                if (!cfg.off[id] && FNS[id]) chain.push(FNS[id]);
+            }}
+            var pending = chain.length, served = false;
+            sub('Searching lyrics (' + chain.length + ' providers)…');
+            chain.forEach(function(prov) {{
+                prov(info).then(function(hit) {{
+                    if (curKey !== info.key) return;
+                    pending--;
+                    if (hit.synced && !synced) {{
+                        lines = hit.rows; synced = true; served = true;
+                        render(); sub(hit.label);
+                        log('served: ' + hit.label);
+                    }} else if (!served) {{
+                        lines = hit.rows; served = true;
+                        render(); sub(hit.label);
+                        log('served: ' + hit.label);
+                    }}
+                    if (!served && pending === 0) {{
+                        lines = []; render(); sub('');
+                        offerTranscribe(info);
+                    }}
+                }}, function() {{
+                    if (curKey !== info.key) return;
+                    pending--;
+                    if (!served && pending === 0) {{
+                        lines = []; render(); sub('');
+                        offerTranscribe(info);
+                    }}
+                }});
+            }});
+        }}
+        function ensureButton() {{
+            try {{
+                if (document.getElementById('py-lyrics-btn')) return;
+                var np = document.querySelector('[data-testid="now-playing-bar"]');
+                if (!np) return;
+                css();  // styles must exist before first panel open,
+                        // or the button renders as a default grey strip
+                var b = document.createElement('button');
+                b.id = 'py-lyrics-btn';
+                b.title = 'Show lyrics';
+                // Wear Spotify's own mic icon: clone the stock lyrics
+                // button's SVG (that button stays hidden; text fallback).
+                try {{
+                    var lbs = document.querySelectorAll(
+                        'button[aria-label*="lyric" i]');
+                    for (var li = 0; li < lbs.length; li++) {{
+                        var svg = lbs[li].querySelector('svg');
+                        if (svg) {{
+                            b.appendChild(svg.cloneNode(true));
+                            break;
+                        }}
+                    }}
+                    if (!b.firstChild) b.textContent = 'LYRICS';
+                }} catch (e) {{ b.textContent = 'LYRICS'; }}
+                b.onclick = toggle;
+                // Inline with the controls row (next to volume), NOT as a
+                // new full-width flex row: the aside stacks vertically, so
+                // appending here created a second band under the bar.
+                var anchor = np.querySelector('[data-testid="volume-bar"]') ||
+                             np.querySelector('[data-testid="control-button-queue"]');
+                if (anchor && anchor.parentElement)
+                    anchor.parentElement.insertBefore(b, anchor);
+                else
+                    np.appendChild(b);
+            }} catch (e) {{}}
+        }}
+        function toggle() {{
+            css();
+            if (panel) {{
+                panel.remove(); panel = null; listEl = null; headEl = null;
+                findBar = null; findInput = null; findHits = []; findIdx = -1;
+                curKey = ''; settingsOpen = false; return;
+            }}
+            settingsOpen = false;
+            try {{ follow = loadCfg().follow !== false; }}
+            catch (x) {{ follow = true; }}
+            panel = document.createElement('div');
+            panel.id = 'py-lyrics-panel';
+            headEl = document.createElement('div');
+            headEl.id = 'py-lyrics-head';
+            var titleSpan = document.createElement('span');
+            titleSpan.id = 'py-lyrics-title';
+            titleSpan.textContent = 'Lyrics';
+            var followBtn = document.createElement('button');
+            followBtn.id = 'py-lyrics-follow';
+            followBtn.title = 'Toggle follow (highlight + autoscroll)';
+            function paintFollow() {{
+                followBtn.textContent = follow ? 'FOLLOW' : 'FREE';
+                followBtn.className = follow ? '' : 'off';
+            }}
+            paintFollow();
+            followBtn.onclick = function(e) {{
+                try {{ e.stopPropagation(); }} catch (x) {{}}
+                follow = !follow;
+                paintFollow();
+                try {{
+                    var cfg = loadCfg();
+                    cfg.follow = follow;
+                    saveCfg(cfg);
+                }} catch (x) {{}}
+                if (!follow && listEl) clearSyncMarks();
+                else sync();
+            }};
+            var gear = document.createElement('button');
+            gear.id = 'py-lyrics-gear';
+            gear.textContent = '⚙';
+            gear.title = 'Lyrics providers + API keys';
+            gear.onclick = function(e) {{
+                try {{ e.stopPropagation(); }} catch (x) {{}}
+                openSettings();
+            }};
+            headEl.appendChild(titleSpan);
+            headEl.appendChild(followBtn);
+            headEl.appendChild(gear);
+            var subEl = document.createElement('div');
+            subEl.id = 'py-lyrics-sub';
+            listEl = document.createElement('div');
+            listEl.id = 'py-lyrics-list';
+            panel.appendChild(headEl);
+            panel.appendChild(subEl);
+            findBar = document.createElement('div');
+            findBar.id = 'py-lyrics-find';
+            findInput = document.createElement('input');
+            findInput.placeholder = 'Find in lyrics (Enter ↵ / Shift+Enter)';
+            findInput.autocomplete = 'off';
+            findInput.spellcheck = false;
+            findInput.addEventListener('input', findMatches);
+            findInput.addEventListener('keydown', function(e) {{
+                if (e.key === 'Enter') {{
+                    e.preventDefault(); jumpFind(!e.shiftKey);
+                }} else if (e.key === 'Escape') {{
+                    toggleFind(false);
+                }}
+                try {{ e.stopPropagation(); }} catch (x) {{}}
+            }});
+            findBar.appendChild(findInput);
+            panel.appendChild(findBar);
+            panel.appendChild(listEl);
+            document.body.appendChild(panel);
+            loadFor(trackInfo());
+        }}
+        // Search-in-lyrics (lyrics-plus parity): Ctrl+Shift+F toggles,
+        // Enter / Shift+Enter jumps next/prev match.
+        function toggleFind(force) {{
+            if (!findBar) return;
+            var show = (typeof force === 'boolean') ? force :
+                       (findBar.style.display !== 'block');
+            findBar.style.display = show ? 'block' : 'none';
+            findHits = []; findIdx = -1;
+            if (show && findInput) findInput.focus();
+            else paintFind();
+        }}
+        function findMatches() {{
+            findHits = []; findIdx = -1;
+            var q = findInput ? findInput.value.toLowerCase() : '';
+            if (q && listEl) {{
+                var kids = listEl.children;
+                for (var i = 0; i < kids.length; i++) {{
+                    var t = (kids[i].innerText || '').toLowerCase();
+                    if (t.indexOf(q) !== -1) findHits.push(i);
+                }}
+                if (findHits.length) findIdx = 0;
+            }}
+            paintFind(true);
+        }}
+        function paintFind(scroll) {{
+            if (!listEl) return;
+            var kids = listEl.children;
+            for (var i = 0; i < kids.length; i++) {{
+                kids[i].classList.remove('hit');
+                kids[i].classList.remove('cur-hit');
+            }}
+            for (var h = 0; h < findHits.length; h++) {{
+                var el = kids[findHits[h]];
+                if (el) el.classList.add('hit');
+            }}
+            if (scroll && findIdx >= 0) {{
+                var cur = kids[findHits[findIdx]];
+                if (cur) {{
+                    cur.classList.add('cur-hit');
+                    cur.scrollIntoView({{block: 'center'}});
+                }}
+            }}
+        }}
+        function jumpFind(fwd) {{
+            if (!findHits.length) return;
+            findIdx = (findIdx + (fwd ? 1 : -1) + findHits.length) % findHits.length;
+            paintFind(true);
+        }}
+        document.addEventListener('keydown', function(e) {{
+            try {{
+                if (!panel || settingsOpen) return;
+                if (e.ctrlKey && e.shiftKey &&
+                    (e.key === 'F' || e.key === 'f')) {{
+                    e.preventDefault();
+                    toggleFind();
+                    try {{ e.stopPropagation(); }} catch (x) {{}}
+                }}
+            }} catch (x) {{}}
+        }});
+        // Settings view: API keys for the key-based providers, saved to
+        // localStorage (live layer) + mirrored to the Python JSON config.
+        var settingsOpen = false;
+        function openSettings() {{
+            if (!listEl) return;
+            settingsOpen = true;
+            var ks = currentKeys();
+            var cfg = loadCfg();
+            listEl.innerHTML = '';
+            function field(label, id, val, hint) {{
+                var l = document.createElement('label');
+                l.textContent = label;
+                var inp = document.createElement('input');
+                inp.id = id; inp.type = 'text';
+                inp.value = val || '';
+                inp.placeholder = hint;
+                inp.autocomplete = 'off';
+                inp.spellcheck = false;
+                listEl.appendChild(l);
+                listEl.appendChild(inp);
+            }}
+            field('Musixmatch API key', 'py-k-mm', ks.mm, 'optional');
+            field('Vagalume API key', 'py-k-vag', ks.vag, 'optional');
+            field('Genius access token', 'py-k-gen', ks.gen, 'optional');
+            var pl = document.createElement('label');
+            pl.textContent = 'Providers (order = priority)';
+            pl.style.marginTop = '14px';
+            listEl.appendChild(pl);
+            var order = cfg.order.slice();
+            function drawOrder() {{
+                var old = document.getElementById('py-prov-list');
+                if (old) old.remove();
+                var box = document.createElement('div');
+                box.id = 'py-prov-list';
+                order.forEach(function(id, idx) {{
+                    var row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0;';
+                    var cb = document.createElement('input');
+                    cb.type = 'checkbox'; cb.dataset.id = id;
+                    cb.checked = !cfg.off[id];
+                    cb.style.width = 'auto';
+                    var nm = document.createElement('span');
+                    nm.textContent = PROV_NAMES[id] || id;
+                    nm.style.cssText = 'flex:1;color:#e8e8e8;font-size:13px;';
+                    var up = document.createElement('button');
+                    up.textContent = '▲'; up.title = 'Move up';
+                    var dn = document.createElement('button');
+                    dn.textContent = '▼'; dn.title = 'Move down';
+                    [up, dn].forEach(function(b) {{
+                        b.style.cssText = 'background:rgba(255,255,255,0.1);border:none;border-radius:4px;color:#fff;padding:2px 8px;cursor:pointer;';
+                    }});
+                    up.onclick = function() {{
+                        if (idx > 0) {{
+                            order.splice(idx - 1, 0, order.splice(idx, 1)[0]);
+                            drawOrder();
+                        }}
+                    }};
+                    dn.onclick = function() {{
+                        if (idx < order.length - 1) {{
+                            order.splice(idx + 1, 0, order.splice(idx, 1)[0]);
+                            drawOrder();
+                        }}
+                    }};
+                    row.appendChild(cb);
+                    row.appendChild(nm);
+                    row.appendChild(up);
+                    row.appendChild(dn);
+                    box.appendChild(row);
+                }});
+                listEl.appendChild(box);
+            }}
+            drawOrder();
+            var save = document.createElement('button');
+            save.id = 'py-lyrics-save';
+            save.textContent = 'SAVE';
+            save.onclick = function() {{ saveSettings(order); }};
+            listEl.appendChild(save);
+            sub('Keys + provider order save to the lyrics config file.');
+        }}
+        function saveSettings(order) {{
+            try {{
+                var vals = {{
+                    mm: document.getElementById('py-k-mm').value.trim(),
+                    vag: document.getElementById('py-k-vag').value.trim(),
+                    gen: document.getElementById('py-k-gen').value.trim()
+                }};
+                var off = {{}};
+                var cbs = listEl.querySelectorAll(
+                    '#py-prov-list input[type="checkbox"]');
+                for (var i = 0; i < cbs.length; i++)
+                    if (!cbs[i].checked) off[cbs[i].dataset.id] = true;
+                saveCfg({{keys: vals, order: order.slice(), off: off}});
+            }} catch (e) {{}}
+            settingsOpen = false;
+            curKey = '';
+            loadFor(trackInfo());
+        }}
+        // Mic icon can only be cloned once Spotify's own lyrics button
+        // exists (it renders later than ours) -- retry until it lands.
+        function upgradeButtonIcon() {{
+            try {{
+                var b = document.getElementById('py-lyrics-btn');
+                if (!b || b.querySelector('svg')) return;
+                var lbs = document.querySelectorAll(
+                    'button[aria-label*="lyric" i]');
+                for (var li = 0; li < lbs.length; li++) {{
+                    var svg = lbs[li].querySelector('svg');
+                    if (svg) {{
+                        b.textContent = '';
+                        b.appendChild(svg.cloneNode(true));
+                        log('mic icon cloned');
+                        return;
+                    }}
+                }}
+            }} catch (e) {{}}
+        }}
+        // sub() targets headEl.nextSibling == the sub div.
+        setInterval(function() {{
+            ensureButton();
+            upgradeButtonIcon();
+            if (!panel || settingsOpen) return;
+            var info = trackInfo();
+            if (info.key && info.key !== curKey &&
+                info.title && info.title !== 'Spotify') {{
+                transKey = '';
+                window.__pyTranscribeStatus = '';
+                loadFor(info);
+            }}
+            sync();
+            pollTranscribe();
+        }}, 1000);
+        log('lyrics armed (MainWorld)');
+    }})();
+    """
+    script = QWebEngineScript()
+    script.setName("lyrics-mainworld")
     script.setSourceCode(js)
     script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
     script.setRunsOnSubFrames(False)
@@ -1118,54 +2395,70 @@ _DUMP_JS = ("(() => { try {"
 
 
 class TitleBar(QWidget):
-    """Minimal custom titlebar: drag-to-move + close/minimize, since a
-    frameless window has no native one."""
+    """Custom titlebar: Discord/ClearVision-style flat window controls
+    (dim glyphs, subtle hover, red close) + drag-to-move, since a
+    frameless window has no native one. Fill matches the body panels
+    exactly, so the whole window reads as one transparency."""
+
+    # Shared with PySteam's TitleBar: keep the two in sync.
+    BTN_BASE = (
+        "QPushButton { color: #b9bbbe; background: transparent; "
+        "border: none; font-size: 16px; }"
+        "QPushButton:hover { color: white; background: rgba(255,255,255,25); }"
+    )
+    BTN_MAX = (
+        "QPushButton { color: #b9bbbe; background: transparent; "
+        "border: none; font-size: 11px; }"
+        "QPushButton:hover { color: white; background: rgba(255,255,255,25); }"
+    )
+    BTN_CLOSE = (
+        "QPushButton { color: #b9bbbe; background: transparent; "
+        "border: none; font-size: 18px; }"
+        "QPushButton:hover { color: white; background: #ed4245; }"
+    )
 
     def __init__(self, parent_window):
         super().__init__(parent_window)
         self._parent_window = parent_window
         self._drag_pos = None
-        self.setFixedHeight(28)
+        self.setFixedHeight(30)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setContentsMargins(8, 0, 0, 0)
+        layout.setSpacing(0)
 
         label = QLabel("Spotify")
-        label.setStyleSheet("color: white; font-weight: bold; background: transparent;")
+        label.setStyleSheet(
+            "color: #b9bbbe; font-weight: bold; background: transparent; "
+            "padding-left: 4px;")
         layout.addWidget(label)
         layout.addStretch()
 
-        min_btn = QPushButton("_")
-        min_btn.setFixedSize(24, 24)
+        min_btn = QPushButton("–")
+        max_btn = QPushButton("□")
+        close_btn = QPushButton("×")
+        for b in (min_btn, max_btn, close_btn):
+            b.setFixedSize(34, 30)
+            layout.addWidget(b)
+        min_btn.setStyleSheet(self.BTN_BASE)
+        max_btn.setStyleSheet(self.BTN_MAX)
+        close_btn.setStyleSheet(self.BTN_CLOSE)
         min_btn.clicked.connect(parent_window.showMinimized)
-
-        close_btn = QPushButton("x")
-        close_btn.setFixedSize(24, 24)
+        max_btn.clicked.connect(self._toggle_max)
         close_btn.clicked.connect(parent_window.close)
 
-        for b in (min_btn, close_btn):
-            b.setStyleSheet(
-                "QPushButton { color: white; background: rgba(255,255,255,30); border: none; border-radius: 4px; }"
-                "QPushButton:hover { background: rgba(255,255,255,70); }"
-            )
-            layout.addWidget(b)
-
-        self.setAutoFillBackground(True)
-        _tb_a = int(_TB_ALPHA * 255)
-        pal = self.palette()
-        pal.setColor(pal.ColorRole.Window, QColor(12, 12, 14, _tb_a))
-        self.setPalette(pal)
-        self.setStyleSheet(
-            f"TitleBar {{ background-color: rgba(12, 12, 14, {_tb_a}); border: none; }}"
-            "QLabel { background: transparent; }"
-        )
-        if DEBUG:
-            print(f"[debug] titlebar alpha={_TB_ALPHA} ({_tb_a}/255)", flush=True)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
 
+    def _toggle_max(self):
+        w = self._parent_window
+        try:
+            w.showNormal() if w.isMaximized() else w.showMaximized()
+        except Exception:
+            pass
+
     def paintEvent(self, event):
-        # Explicit fill: stylesheet/palette fills are unreliable on
-        # translucent frameless windows (Wayland), painter always runs.
+        # Titlebar alpha is user-tunable (SPOTIFY_TITLEBAR_ALPHA, default
+        # 0.65): panel alpha proved too clear over bright wallpapers.
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(12, 12, 14, int(_TB_ALPHA * 255)))
         super().paintEvent(event)
@@ -1204,9 +2497,9 @@ class CornerGrip(QLabel):
         super().__init__("◢", parent_window)
         self._parent_window = parent_window
         self._drag = None
-        self.setFixedSize(24, 24)
+        self.setFixedSize(16, 16)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("color: rgba(255,255,255,110); background: transparent; font-size: 14px;")
+        self.setStyleSheet("color: rgba(255,255,255,110); background: transparent; font-size: 9px;")
         self.setCursor(Qt.CursorShape.SizeFDiagCursor)
 
     def mousePressEvent(self, event):
@@ -1490,6 +2783,328 @@ class BottomBar(QWidget):
     # never grabs pointer input, so sliders/buttons can't turn into moves.
 
 
+TRANSCRIBE_CACHE_DIR = os.path.expanduser("~/.cache/SpotifyTransparent/transcribe")
+TRANSCRIBE_MODEL = os.environ.get("SPOTIFY_WHISPER_MODEL", "base")
+TRANSCRIBE_ENV = os.path.expanduser(
+    "~/.local/share/SpotifyTransparent/transcribe-env")
+_TRANSCRIBE_PATH_ADDED = False
+
+
+def transcribe_cache_key(title: str, artist: str) -> str:
+    import hashlib
+    return hashlib.sha1(f"{title}\x00{artist}".lower().encode()).hexdigest()
+
+
+class TranscribeWorker(QThread):
+    """Auto-generate lyrics by transcription: finds the track on YouTube,
+    downloads audio (yt-dlp), transcribes locally with faster-whisper
+    (timestamped segments -> synced lines), caches the JSON. Runs fully
+    off the UI thread; reports via signals + window bridge vars."""
+
+    status = pyqtSignal(str)          # human-readable progress
+    done = pyqtSignal(str, list, str, str)  # (key, lines, video_id, video_title)
+    failed = pyqtSignal(str)          # reason (missing deps, no match...)
+
+    def __init__(self, title, artist, duration, cache_key, excluded=None):
+        super().__init__()
+        self.title = title
+        self.artist = artist
+        self.duration = duration
+        self.cache_key = cache_key
+        self.excluded = set(excluded or [])
+
+    BAD_UPLOAD_HINTS = (
+        "cover", "remix", "sped up", "slowed", "nightcore", "8d audio",
+        "instrumental", "karaoke", "reverb", "flip", " acoustic",
+        "live ", "concert", "reaction", "review", "interview",
+    )
+
+    @classmethod
+    def score_candidate(cls, title, artist, dur, vid_title, vid_dur):
+        """Higher = more likely the actual studio track. Title word
+        overlap dominates; altered-version uploads penalized; duration
+        is a tiebreak with a hard 25s reject."""
+        import re
+        tw = {w for w in re.split(r"\W+", (title + " " + artist).lower())
+              if len(w) > 2}
+        vw = set(re.split(r"\W+", (vid_title or "").lower()))
+        overlap = len(tw & vw)
+        low = (vid_title or "").lower()
+        penalty = sum(1 for b in cls.BAD_UPLOAD_HINTS if b in low)
+        durdiff = abs(vid_dur - dur) if dur else 0
+        return overlap * 10 - penalty * 8 - min(durdiff, 60) / 6, overlap
+
+    @staticmethod
+    def _bin(name: str) -> str | None:
+        import shutil
+        for cand in (os.path.join(TRANSCRIBE_ENV, "bin", name),):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+        found = shutil.which(name)
+        if found:
+            return found
+        local = os.path.expanduser(f"~/.local/bin/{name}")
+        return local if os.path.isfile(local) and os.access(local, os.X_OK) else None
+
+    @staticmethod
+    def _use_env():
+        """Put the transcribe venv's site-packages on sys.path so its
+        faster-whisper / imageio-ffmpeg import in-process."""
+        global _TRANSCRIBE_PATH_ADDED
+        if _TRANSCRIBE_PATH_ADDED:
+            return
+        import glob
+        for sp in glob.glob(os.path.join(TRANSCRIBE_ENV, "lib",
+                                         "python3*", "site-packages")):
+            if os.path.isdir(sp) and sp not in sys.path:
+                sys.path.insert(0, sp)
+        _TRANSCRIBE_PATH_ADDED = True
+
+    @staticmethod
+    def _ffmpeg_exe() -> str | None:
+        try:
+            import imageio_ffmpeg
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+            return exe if os.path.isfile(exe) else None
+        except Exception:
+            return None
+
+    @classmethod
+    def ensure_deps(cls, status_cb) -> str | None:
+        """Isolated venv for transcriber deps (PEP 668-clean, no sudo,
+        no system pollution). Returns None when ready, else a reason."""
+        import subprocess
+        cls._use_env()
+        try:
+            import faster_whisper  # noqa: F401
+            have_fw = True
+        except ImportError:
+            have_fw = False
+        if have_fw and cls._bin("yt-dlp") and (
+                cls._bin("ffmpeg") or cls._ffmpeg_exe()):
+            return None
+        venv_pip = os.path.join(TRANSCRIBE_ENV, "bin", "pip")
+        if not os.path.isfile(venv_pip):
+            status_cb("Creating isolated transcription env (one-time)…")
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "venv", TRANSCRIBE_ENV],
+                    capture_output=True, text=True, timeout=300)
+            except Exception as e:
+                return f"Could not create virtualenv: {e}"
+            if proc.returncode != 0 or not os.path.isfile(venv_pip):
+                tail = (proc.stderr or proc.stdout or "")[-400:]
+                return ("Virtualenv failed — try: sudo pacman -S "
+                        f"python-virtualenv. {tail}")
+        status_cb("Installing transcription tools into isolated env…")
+        try:
+            proc = subprocess.run(
+                [venv_pip, "install", "yt-dlp", "faster-whisper",
+                 "imageio-ffmpeg"],
+                capture_output=True, text=True, timeout=1200)
+        except Exception as e:
+            return f"Installer failed: {e}"
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-400:]
+            return f"Installer failed. {tail}"
+        global _TRANSCRIBE_PATH_ADDED
+        _TRANSCRIBE_PATH_ADDED = False
+        cls._use_env()
+        # Re-verify.
+        try:
+            import faster_whisper  # noqa: F401
+        except ImportError:
+            return "faster-whisper still missing after install."
+        if cls._bin("yt-dlp") is None:
+            return "yt-dlp still missing after install."
+        if cls._bin("ffmpeg") is None and cls._ffmpeg_exe() is None:
+            return "ffmpeg still missing after install."
+        return None
+
+    def run(self):
+        import json as _json
+        import shutil
+        import subprocess
+        import tempfile
+        try:
+            # 0. One-time user-space install (no sudo).
+            missing = self.ensure_deps(self.status.emit)
+            if missing:
+                self.failed.emit(missing)
+                return
+            ytdlp = self._bin("yt-dlp")
+            env = dict(os.environ)
+            env["PATH"] = (os.path.join(TRANSCRIBE_ENV, "bin") +
+                           os.pathsep +
+                           os.path.expanduser("~/.local/bin") +
+                           os.pathsep + env.get("PATH", ""))
+            ff = self._bin("ffmpeg") or self._ffmpeg_exe()
+            # 1. Search YouTube, score candidates (title overlap beats
+            # duration; covers/remixes penalized; tried IDs excluded).
+            self.status.emit("Searching YouTube…")
+            query = f"{self.title} {self.artist} audio"
+            proc = subprocess.run(
+                [ytdlp, f"ytsearch10:{query}",
+                 "--print", "%(id)s\t%(duration)s\t%(title)s",
+                 "--no-download", "--quiet", "--no-warnings"],
+                capture_output=True, text=True, timeout=120,
+                env=env)
+            cands = []
+            for line in (proc.stdout or "").splitlines():
+                parts = line.split("\t")
+                if len(parts) < 3 or parts[0] in self.excluded:
+                    continue
+                try:
+                    cands.append((parts[0], float(parts[1]), parts[2]))
+                except ValueError:
+                    pass
+            if not cands:
+                self.failed.emit("YouTube found nothing new for this track.")
+                return
+            target = self.duration or 0
+            scored = [(self.score_candidate(self.title, self.artist, target,
+                                            t, d), (v, d, t))
+                      for (v, d, t) in cands]
+            scored.sort(key=lambda s: (s[0][0], -abs(s[1][1] - target)),
+                        reverse=True)
+            (score, overlap), (vid, vdur, vtitle) = scored[0]
+            if overlap < 1:
+                self.failed.emit(
+                    "No YouTube result actually names this track — skipping.")
+                return
+            if target and abs(vdur - target) > 25:
+                self.failed.emit(
+                    f"Closest YouTube match is {vdur:.0f}s vs {target:.0f}s — skipping.")
+                return
+            # 2. Download audio.
+            self.status.emit(f"Downloading audio ({vtitle[:40]}…)…")
+            tmp = tempfile.mkdtemp(prefix="pytrans_")
+            out = os.path.join(tmp, "audio.%(ext)s")
+            dl_cmd = [ytdlp, vid, "-x", "--audio-format", "mp3",
+                      "--audio-quality", "0", "-o", out,
+                      "--quiet", "--no-warnings", "--no-playlist"]
+            if ff:
+                dl_cmd += ["--ffmpeg-location", ff]
+            proc = subprocess.run(
+                dl_cmd,
+                capture_output=True, text=True, timeout=600,
+                env=env)
+            mp3 = os.path.join(tmp, "audio.mp3")
+            if not os.path.isfile(mp3):
+                tail = (proc.stderr or "")[-300:]
+                self.failed.emit(f"Audio download failed. {tail}")
+                return
+            # 3. Transcribe locally (timestamps -> synced lines).
+            self.status.emit("Transcribing (local Whisper AI, minutes)…")
+            lines = transcribe_mp3(mp3)
+            try:
+                shutil.rmtree(tmp, ignore_errors=True)
+            except Exception:
+                pass
+            if not lines:
+                self.failed.emit("Transcription came back empty.")
+                return
+            os.makedirs(TRANSCRIBE_CACHE_DIR, exist_ok=True)
+            with open(os.path.join(TRANSCRIBE_CACHE_DIR,
+                                   self.cache_key + ".json"), "w") as f:
+                _json.dump({"video_id": vid, "video_title": vtitle,
+                            "lines": lines}, f)
+            self.done.emit(self.cache_key, lines, vid, vtitle)
+        except Exception as e:
+            self.failed.emit(f"Transcription error: {e}")
+
+
+def transcribe_mp3(mp3_path: str) -> list:
+    """Local Whisper transcription -> [{t, x}] synced lines."""
+    from faster_whisper import WhisperModel
+    model = WhisperModel(TRANSCRIBE_MODEL, device="cpu", compute_type="int8")
+    segments, _info = model.transcribe(mp3_path, beam_size=5)
+    return [{"t": float(s.start), "x": s.text.strip()}
+            for s in segments if s.text and s.text.strip()]
+
+
+class RecordWorker(QThread):
+    """Transcribe the exact song by capturing live playback: seeks to the
+    start (via page bridge), records the PipeWire monitor for the track
+    duration, transcribes. Guaranteed the right song (it's what's playing)
+    at the cost of one real-time listen with the volume up."""
+
+    status = pyqtSignal(str)
+    done = pyqtSignal(str, list, str, str)  # (key, lines, 'live', monitor)
+    failed = pyqtSignal(str)
+
+    def __init__(self, title, artist, duration, cache_key):
+        super().__init__()
+        self.title = title
+        self.artist = artist
+        self.duration = duration
+        self.cache_key = cache_key
+
+    def run(self):
+        import json as _json
+        import shutil
+        import subprocess
+        import tempfile
+        import time
+        try:
+            missing = TranscribeWorker.ensure_deps(self.status.emit)
+            if missing:
+                self.failed.emit(missing)
+                return
+            ff = TranscribeWorker._bin("ffmpeg") or TranscribeWorker._ffmpeg_exe()
+            if not ff:
+                self.failed.emit("No ffmpeg available for recording.")
+                return
+            # Default sink's monitor source.
+            proc = subprocess.run(["pactl", "get-default-sink"],
+                                  capture_output=True, text=True, timeout=15)
+            sink = (proc.stdout or "").strip().split("\n")[0].strip()
+            if not sink:
+                self.failed.emit("Could not find the audio output (pactl).")
+                return
+            monitor = sink + ".monitor"
+            dur = int(self.duration or 0)
+            if dur <= 0:
+                self.failed.emit("Unknown track length — play the song first.")
+                return
+            # The page was asked to seek to 0 just before starting us;
+            # Python only starts us once position reads ~0:00, so a
+            # token settle delay suffices.
+            self.status.emit("Recording live playback — keep volume up…")
+            time.sleep(1)
+            tmp = tempfile.mkdtemp(prefix="pyrec_")
+            mp3 = os.path.join(tmp, "rec.mp3")
+            proc = subprocess.run(
+                [ff, "-y", "-f", "pulse", "-i", monitor,
+                 "-t", str(dur + 5), "-ac", "1", "-ar", "16000", mp3],
+                capture_output=True, text=True,
+                timeout=dur + 180)
+            if not os.path.isfile(mp3) or os.path.getsize(mp3) < 10000:
+                tail = (proc.stderr or "")[-300:]
+                self.failed.emit(f"Recording failed (is audio playing?). {tail}")
+                return
+            self.status.emit("Transcribing recording (local Whisper AI)…")
+            lines = transcribe_mp3(mp3)
+            try:
+                shutil.rmtree(tmp, ignore_errors=True)
+            except Exception:
+                pass
+            if not lines:
+                self.failed.emit(
+                    "Transcription empty — volume may have been muted.")
+                return
+            os.makedirs(TRANSCRIBE_CACHE_DIR, exist_ok=True)
+            with open(os.path.join(TRANSCRIBE_CACHE_DIR,
+                                   self.cache_key + ".json"), "w") as f:
+                _json.dump({"video_id": "live-record",
+                            "video_title": "live playback capture",
+                            "lines": lines}, f)
+            self.done.emit(self.cache_key, lines, "live-record",
+                           "live playback capture")
+        except Exception as e:
+            self.failed.emit(f"Recording error: {e}")
+
+
 class SpotifyWindow(QMainWindow):
     def __init__(self, no_adblock=False, opaque=False):
         super().__init__()
@@ -1547,6 +3162,8 @@ class SpotifyWindow(QMainWindow):
         self.profile.scripts().insert(build_inject_script(INJECTED_CSS))
         # Page-level ad skipper (MainWorld: needs page-context webpack).
         self.profile.scripts().insert(build_adskip_script())
+        # In-page lyrics panel (MainWorld: fetch + DOM).
+        self.profile.scripts().insert(build_lyrics_script())
 
         # --- Ad blocker (skippable via --no-adblock for login tests) ---
         if not no_adblock:
@@ -1587,6 +3204,9 @@ class SpotifyWindow(QMainWindow):
 
         self.page.load(QUrl(SPOTIFY_URL))
 
+        # Seed saved lyrics keys into the page once loaded.
+        self.page.loadFinished.connect(lambda _ok: self._seed_lyrics_keys())
+
         # Clipboard bridge pump: the MainWorld script stashes every
         # programmatic copy in window.__pyClipboardPending; mirror it
         # onto the real system clipboard (see _pump_clipboard).
@@ -1594,6 +3214,16 @@ class SpotifyWindow(QMainWindow):
         self._clip_timer = QTimer(self)
         self._clip_timer.timeout.connect(self._pump_clipboard)
         self._clip_timer.start(500)
+
+        # Transcription bridge pump (1s): page requests via
+        # window.__pyTranscribeReq; results/status go back through
+        # window.__pyTranscribeResult / __pyTranscribeStatus.
+        self._transcriber = None
+        self._trans_req_seen = ""
+        self._seek_wait = None
+        self._trans_timer = QTimer(self)
+        self._trans_timer.timeout.connect(self._pump_transcribe)
+        self._trans_timer.start(1000)
 
         # SPOTIFY_DUMP=1: one-shot footer/art diagnostic (~12s after load),
         # printed as [dump] lines for pasting into a bug report.
@@ -1614,10 +3244,167 @@ class SpotifyWindow(QMainWindow):
             self._grip.raise_()
             self._grip.show()
 
+    def _pump_transcribe(self):
+        try:
+            if self._seek_wait:
+                self.page.runJavaScript(
+                    "(function(){try{var b=document.querySelector("
+                    "'[data-testid=\"progress-bar\"]');var m=((b&&b.getAttribute"
+                    "('style'))||'').match(/--progress-bar-transform:\\s*"
+                    "([\\d.]+)%/);var st='';try{st=navigator.mediaSession?"
+                    "navigator.mediaSession.playbackState:'';}catch(e){}"
+                    "return (m?m[1]:'')+'|'+st;}catch(e){return '';}})()",
+                    self._on_seek_pos)
+                return
+            self.page.runJavaScript(
+                "window.__pyTranscribeReq || ''", self._on_trans_req)
+        except Exception:
+            pass
+
+    def _on_seek_pos(self, frac):
+        """Start the recorder only once playback is back near 0:00 AND
+        actually playing (a paused seek reads 0% but records silence)."""
+        wait = self._seek_wait
+        if not wait:
+            return
+        try:
+            parts = str(frac).split("|")
+            ok = (parts[0] != "" and float(parts[0]) < 3.0
+                  and len(parts) > 1 and parts[1] == "playing")
+        except (TypeError, ValueError):
+            ok = False
+        import time as _t
+        if ok or _t.time() > wait["deadline"]:
+            self._seek_wait = None
+            if not ok and DEBUG:
+                print("[lyrics] seek unverified, recording anyway",
+                      flush=True)
+            self._start_record_worker(wait)
+
+    def _start_record_worker(self, wait):
+        self._transcriber = RecordWorker(wait["title"], wait["artist"],
+                                        wait["dur"], wait["key"])
+        self._transcriber.status.connect(self._set_trans_status)
+        self._transcriber.done.connect(
+            lambda k, lines, _v, _t:
+            self._deliver_trans_result(k, lines,
+                                       "Transcribed · live recording",
+                                       _v, _t))
+        self._transcriber.failed.connect(
+            lambda msg: self._deliver_trans_error(wait["key"], msg))
+        self._transcriber.start()
+
+    def _on_trans_req(self, text):
+        if not text or text == self._trans_req_seen:
+            return
+        self._trans_req_seen = text
+        try:
+            req = json.loads(text)
+            title, artist = req.get("title", ""), req.get("artist", "")
+            dur = float(req.get("dur") or 0)
+            key = req.get("key") or transcribe_cache_key(title, artist)
+            mode = req.get("mode") or "youtube"
+            excluded = [str(x) for x in (req.get("exclude") or [])]
+        except Exception:
+            return
+        if not title:
+            return
+        if self._transcriber is not None and self._transcriber.isRunning():
+            self._set_trans_status("Already transcribing — wait for it…")
+            return
+        # Cached result first (instant), unless retrying past it.
+        if mode == "youtube":
+            try:
+                with open(os.path.join(TRANSCRIBE_CACHE_DIR, key + ".json")) as f:
+                    cached = json.load(f)
+                if isinstance(cached, list):
+                    lines, vid, vtitle = cached, "", ""
+                else:
+                    lines, vid = cached.get("lines", []), cached.get("video_id", "")
+                    vtitle = cached.get("video_title", "")
+                if lines and vid not in excluded:
+                    self._deliver_trans_result(
+                        key, lines, "Transcribed · Whisper (cached)",
+                        vid, vtitle)
+                    return
+            except Exception:
+                pass
+        else:
+            # Live recording: resume if paused, restart the song via page
+            # bridge, lock the player UI, then only start the recorder
+            # once position reads ~0:00 while playing (blind sleeps miss
+            # the head of the song; a paused seek would record silence).
+            try:
+                self.page.runJavaScript(
+                    "window.__pyPlayReq = true;"
+                    "window.__pySeekReq = {ms: 0, at: Date.now()};"
+                    "window.__pyUiLock = true;")
+            except Exception:
+                pass
+            import time as _t
+            self._seek_wait = {"title": title, "artist": artist,
+                               "dur": dur, "key": key,
+                               "deadline": _t.time() + 15}
+            self._set_trans_status("Restarting song…")
+            return
+        # The worker self-bootstraps its isolated venv on first run and
+        # reports progress/failure back through the bridge.
+        if mode == "record":
+            self._transcriber = RecordWorker(title, artist, dur, key)
+            label = "Transcribed · live recording"
+        else:
+            self._transcriber = TranscribeWorker(title, artist, dur, key,
+                                                excluded)
+            label = "Transcribed · Whisper (auto)"
+        self._transcriber.status.connect(self._set_trans_status)
+        self._transcriber.done.connect(
+            lambda k, lines, _v, _t, label=label:
+            self._deliver_trans_result(k, lines, label, _v, _t))
+        self._transcriber.failed.connect(
+            lambda msg: self._deliver_trans_error(key, msg))
+        self._transcriber.start()
+        self._set_trans_status("Starting transcription…")
+
+    def _set_trans_status(self, s):
+        try:
+            self.page.runJavaScript(
+                "window.__pyTranscribeStatus = " + json.dumps(str(s)))
+        except Exception:
+            pass
+
+    def _deliver_trans_result(self, key, lines, label, vid="", vtitle=""):
+        try:
+            payload = json.dumps({"key": key, "lines": lines, "label": label,
+                                  "video_id": vid, "video_title": vtitle})
+            self.page.runJavaScript(
+                "window.__pyTranscribeResult = " + payload + ";"
+                "window.__pyTranscribeReq = '';"
+                "window.__pyUiLock = false;")
+            self._trans_req_seen = ""
+            if DEBUG:
+                print(f"[lyrics] transcribed {len(lines)} lines", flush=True)
+        except Exception:
+            pass
+
+    def _deliver_trans_error(self, key, msg):
+        try:
+            payload = json.dumps({"key": key, "error": str(msg)})
+            self.page.runJavaScript(
+                "window.__pyTranscribeResult = " + payload + ";"
+                "window.__pyTranscribeReq = '';"
+                "window.__pyUiLock = false;")
+            self._trans_req_seen = ""
+            if DEBUG:
+                print(f"[lyrics] transcribe failed: {msg}", flush=True)
+        except Exception:
+            pass
+
     def _pump_clipboard(self):
         try:
             self.page.runJavaScript(
                 "window.__pyClipboardPending || ''", self._on_clip_text)
+            self.page.runJavaScript(
+                "window.__pyLyricsKeysPending || ''", self._on_keys_text)
         except Exception:
             pass
 
@@ -1640,8 +3427,62 @@ class SpotifyWindow(QMainWindow):
         except Exception:
             pass
 
+    def _on_keys_text(self, text):
+        """Persist the lyrics panel config (keys + provider order)."""
+        if not text:
+            return
+        try:
+            cfg = json.loads(text)
+            if not isinstance(cfg, dict):
+                return
+            if "keys" in cfg:  # new shape from settings view
+                keys = cfg.get("keys") or {}
+                data = {
+                    "keys": {k: str(keys.get(k, "")) for k in ("mm", "vag", "gen")},
+                    "order": [str(x) for x in (cfg.get("order") or [])][:16],
+                    "off": {str(k): True for k in (cfg.get("off") or {})},
+                }
+            else:  # legacy flat keys
+                data = {k: str(cfg.get(k, "")) for k in ("mm", "vag", "gen")}
+        except Exception:
+            return
+        try:
+            os.makedirs(LYRICS_CONFIG_DIR, exist_ok=True)
+            with open(LYRICS_KEYS_PATH, "w") as f:
+                json.dump(data, f)
+            self.page.runJavaScript("window.__pyLyricsKeysPending = ''")
+            if DEBUG:
+                print("[lyrics] config saved", flush=True)
+        except Exception:
+            pass
+
+    def _seed_lyrics_keys(self):
+        """Push the saved lyrics config into the page on startup so
+        providers and order apply without env vars."""
+        try:
+            with open(LYRICS_KEYS_PATH) as f:
+                data = json.load(f)
+        except Exception:
+            return
+        try:
+            if isinstance(data, dict) and "keys" in data:
+                payload = json.dumps(data)
+            else:  # legacy flat keys
+                keys = data if isinstance(data, dict) else {}
+                payload = json.dumps({
+                    "keys": {k: str(keys.get(k, "")) for k in ("mm", "vag", "gen")},
+                    "order": [],
+                    "off": {},
+                })
+            js = ("try{localStorage.setItem('py-lyr-cfg'," +
+                  json.dumps(payload) + ")}catch(e){}")
+            self.page.runJavaScript(js)
+            if DEBUG:
+                print("[lyrics] config seeded", flush=True)
+        except Exception:
+            pass
+
     def resizeEvent(self, event):
-        super().resizeEvent(event)
         super().resizeEvent(event)
         grip = getattr(self, "_grip", None)
         if grip is not None:
